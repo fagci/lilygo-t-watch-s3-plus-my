@@ -32,6 +32,13 @@ namespace recon {
     static Probe probes[PROBE_MAX];
     static volatile int probeN = 0;
 
+    // Рёбра графа: линк STA<->AP с весом по трафику (data-кадры). Основа будущего
+    // визуального графа; пока показываем текстом (план LINKS).
+    struct Edge { uint8_t sta[6]; uint8_t ap[6]; uint32_t packets; uint32_t lastSeen; };
+    static const int EDGE_MAX = 96;
+    static Edge edges[EDGE_MAX];
+    static volatile int edgeN = 0;
+
     static volatile bool started = false;
     static volatile bool hopping = true;
     static volatile int  channel = 1;
@@ -99,6 +106,21 @@ namespace recon {
             }
             if (!d.hasBssid) { memcpy(d.bssid, mac, 6); d.hasBssid = true; }
         }
+    }
+
+    // Учёт ребра STA<->AP (вызывается под спинлоком из cb на data-кадрах)
+    static void edgeTouch(const uint8_t *sta, const uint8_t *ap) {
+        if ((sta[0] & 0x01) || (ap[0] & 0x01)) return;   // только юникаст-узлы
+        for (int i = 0; i < edgeN; i++)
+            if (!memcmp(edges[i].sta, sta, 6) && !memcmp(edges[i].ap, ap, 6)) {
+                edges[i].packets++; edges[i].lastSeen = millis(); return;
+            }
+        int i;
+        if (edgeN < EDGE_MAX) i = edgeN++;
+        else { uint32_t ot = 0xFFFFFFFF; i = 0;
+               for (int k = 0; k < edgeN; k++) if (edges[k].lastSeen < ot) { ot = edges[k].lastSeen; i = k; } }
+        memcpy(edges[i].sta, sta, 6); memcpy(edges[i].ap, ap, 6);
+        edges[i].packets = 1; edges[i].lastSeen = millis();
     }
 
     // IE маяка: SSID + грубое шифрование (open/WEP/WPA/WPA2/WPA3)
@@ -195,9 +217,11 @@ namespace recon {
             uint8_t ds = fr[1] & 3;
             portENTER_CRITICAL(&mux);
             if (ds == 1)      { touch(a2, K_STA, rssi, ch, a1, nullptr, 0, true);
-                                touch(a1, K_AP,  rssi, ch, a1, nullptr, 0, true); }
+                                touch(a1, K_AP,  rssi, ch, a1, nullptr, 0, true);
+                                edgeTouch(a2, a1); }            // STA=a2 -> AP=a1
             else if (ds == 2) { touch(a1, K_STA, rssi, ch, a2, nullptr, 0, true);
-                                touch(a2, K_AP,  rssi, ch, a2, nullptr, 0, true); }
+                                touch(a2, K_AP,  rssi, ch, a2, nullptr, 0, true);
+                                edgeTouch(a1, a2); }            // STA=a1 <- AP=a2
             portEXIT_CRITICAL(&mux);
         } else {                                          // прочее: только обновить известных
             portENTER_CRITICAL(&mux);
@@ -208,7 +232,7 @@ namespace recon {
 
     static void start(int fixedCh) {
         if (started) return;
-        portENTER_CRITICAL(&mux); count = 0; probeN = 0; portEXIT_CRITICAL(&mux);
+        portENTER_CRITICAL(&mux); count = 0; probeN = 0; edgeN = 0; portEXIT_CRITICAL(&mux);
         cntDeauth = cntDisassoc = 0;
         hopping = (fixedCh == 0);
         channel = fixedCh ? fixedCh : 1;
@@ -245,7 +269,7 @@ namespace recon {
 }
 
 namespace scrRecon {
-    enum View { V_APS, V_DEVS, V_AP, V_STA };   // точки / все устройства / клиенты AP / досье
+    enum View { V_APS, V_DEVS, V_AP, V_STA, V_LINKS };   // точки / устройства / клиенты AP / досье / связи
     lv_obj_t *root;
     static lv_obj_t *lblTitle, *lblHdr, *lblList;
     static int     view = V_APS;
@@ -280,6 +304,10 @@ namespace scrRecon {
     // снимок probe-лога (для досье V_STA и счётчика PNL в V_DEVS)
     static recon::Probe probeSnap[recon::PROBE_MAX];
     static int          probeSnapN = 0;
+
+    // снимок рёбер графа (для плана LINKS)
+    static recon::Edge  edgeSnap[recon::EDGE_MAX];
+    static int          edgeSnapN = 0;
 
     // график активности выбранного фильтра (пакетов/с)
     static lv_obj_t *chart = nullptr;
@@ -387,6 +415,8 @@ namespace scrRecon {
         memcpy(snap, recon::devs, snapN * sizeof(recon::Dev));
         probeSnapN = recon::probeN;
         memcpy(probeSnap, recon::probes, probeSnapN * sizeof(recon::Probe));
+        edgeSnapN = recon::edgeN;
+        memcpy(edgeSnap, recon::edges, edgeSnapN * sizeof(recon::Edge));
         portEXIT_CRITICAL(&recon::mux);
 
         uint32_t now = millis();
@@ -395,6 +425,14 @@ namespace scrRecon {
         if (view == V_STA) {                   // vis[] индексирует probeSnap (досье: что ищет MAC)
             for (int i = 0; i < probeSnapN; i++)
                 if (memcmp(probeSnap[i].mac, selSta, 6) == 0) vis[visN++] = i;
+        } else if (view == V_LINKS) {          // vis[] индексирует edgeSnap, сорт по трафику
+            for (int i = 0; i < edgeSnapN; i++)
+                if (now - edgeSnap[i].lastSeen <= KEEP) vis[visN++] = i;
+            for (int i = 1; i < visN; i++) {   // вставками по packets убыванием
+                int k = vis[i], j = i - 1;
+                while (j >= 0 && edgeSnap[vis[j]].packets < edgeSnap[k].packets) { vis[j+1] = vis[j]; j--; }
+                vis[j+1] = k;
+            }
         } else {
             for (int i = 0; i < snapN; i++) {
                 recon::Dev &d = snap[i];
@@ -457,7 +495,11 @@ namespace scrRecon {
             lv_label_set_text(lblTitle, t);
             lv_label_set_text(lblHdr, "");
         } else if (view == V_DEVS) {
-            snprintf(t, sizeof(t), LV_SYMBOL_GPS " " LV_SYMBOL_REFRESH "DEVICES (%d) " LV_SYMBOL_RIGHT "ap", visN);
+            snprintf(t, sizeof(t), LV_SYMBOL_GPS " " LV_SYMBOL_REFRESH "DEVICES (%d) " LV_SYMBOL_RIGHT "link", visN);
+            lv_label_set_text(lblTitle, t);
+            lv_label_set_text(lblHdr, "");
+        } else if (view == V_LINKS) {
+            snprintf(t, sizeof(t), LV_SYMBOL_SHUFFLE " " LV_SYMBOL_REFRESH "LINKS (%d) " LV_SYMBOL_RIGHT "ap", visN);
             lv_label_set_text(lblTitle, t);
             lv_label_set_text(lblHdr, "");
         } else if (view == V_AP) {
@@ -559,6 +601,32 @@ namespace scrRecon {
         return;
     }
 
+    // --- план связей: топ линков STA<->AP по трафику (V_LINKS) ---
+    if (view == V_LINKS) {
+        if (visN == 0) { lv_label_set_text(lblList, "no links yet"); return; }
+        for (int r = 0; r < vr && scrollRow + r < visN; r++) {
+            recon::Edge &e = edgeSnap[vis[scrollRow + r]];
+            uint32_t age = (now - e.lastSeen) / 1000; if (age > 999) age = 999;
+            char sl[16]; devLabel(e.sta, sl, sizeof(sl));
+            char an[16]; int ai = findMac(e.ap);
+            if (ai >= 0) apName(snap[ai], an, sizeof(an));
+            else snprintf(an, sizeof(an), "%02X%02X%02X", e.ap[3], e.ap[4], e.ap[5]);
+
+            char buf[80];
+            snprintf(buf, sizeof(buf), "%-.13s " LV_SYMBOL_RIGHT " %-.13s\n  %6" PRIu32 "p %3" PRIu32 "s",
+                     sl, an, e.packets, age);
+            buf[sizeof(buf) - 1] = '\0';
+            for (char *p = buf; *p; p++) if (*p == '#') *p = '_';
+
+            bool stale = (now - e.lastSeen) > FRESH;
+            int w = snprintf(list + off, LIST_SZ - off, stale ? "~ %s\n" : "%s\n", buf);
+            if (w <= 0 || off + w >= LIST_SZ - 1) break;
+            off += w;
+        }
+        lv_label_set_text(lblList, list);
+        return;
+    }
+
     // --- пустые состояния ---
     if (visN == 0) {
         lv_label_set_text(lblList,
@@ -609,13 +677,14 @@ namespace scrRecon {
 
     // Тап: ТОЛЬКО титул -> переключение/назад; строка списка -> drill
     void tap(int y) {
-        if (y < TITLE_BOT) {                           // тап строго по титулу
-            if      (view == V_APS)  { view = V_DEVS; scrollRow = 0; forceRedraw = true; update(); }
-            else if (view == V_DEVS) { view = V_APS;  scrollRow = 0; forceRedraw = true; update(); }
+        if (y < TITLE_BOT) {                           // тап по титулу = цикл верхних планов
+            if      (view == V_APS)   { view = V_DEVS;  scrollRow = 0; forceRedraw = true; update(); }
+            else if (view == V_DEVS)  { view = V_LINKS; scrollRow = 0; forceRedraw = true; update(); }
+            else if (view == V_LINKS) { view = V_APS;   scrollRow = 0; forceRedraw = true; update(); }
             else back();
             return;
         }
-        if (view == V_STA) return;                     // в досье строки не кликабельны
+        if (view == V_STA || view == V_LINKS) return;  // досье/связи — строки не кликабельны
         int lt = listTop();
         if (y < lt) return;                            // мета/график — не реагируем
         int r = (y - lt) / ROW_H + scrollRow;          // строка = два текстовых ряда
@@ -651,6 +720,7 @@ namespace scrRecon {
         }
         if (view == V_AP)   { view = V_APS;  scrollRow = 0; recon::setLock(0); resetChart(); forceRedraw = true; update(); return true; }
         if (view == V_DEVS) { view = V_APS;  scrollRow = 0; forceRedraw = true; update(); return true; }
+        if (view == V_LINKS){ view = V_APS;  scrollRow = 0; forceRedraw = true; update(); return true; }
         return false;                                   // V_APS -> домой
     }
 

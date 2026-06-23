@@ -213,6 +213,9 @@ namespace recon {
         hopping = (fixedCh == 0);
         channel = fixedCh ? fixedCh : 1;
         hopLast = millis();
+        // Промискуитет должен работать в STA, а не в AP (на старте выставлен AP):
+        // в AP-режиме радио занято собственным маяком, приём кадров рваный.
+        esp_wifi_set_mode(WIFI_MODE_STA);
         esp_wifi_start();
         esp_wifi_set_promiscuous(true);
         esp_wifi_set_promiscuous_rx_cb(cb);
@@ -651,6 +654,6 @@ namespace scrRecon {
         return false;                                   // V_APS -> домой
     }
 
-    void onEnter() { view = V_APS; scrollRow = 0; resetChart(); recon::start(0); }
-    void onExit()  { recon::stop(); }
+    void onEnter() { bleRadioSuspend(); view = V_APS; scrollRow = 0; resetChart(); recon::start(0); }
+    void onExit()  { recon::stop(); bleRadioResume(); }
 }

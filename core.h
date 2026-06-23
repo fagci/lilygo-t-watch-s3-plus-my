@@ -148,6 +148,8 @@ const char *batterySymbol(int pct);
 void bleInit();
 void bleStart();
 void bleStop();
+void bleRadioSuspend();   // заглушить BLE-радио (WiFi-сниф в Recon)
+void bleRadioResume();
 // Notifications
 void notifInit();
 void notifBeep();

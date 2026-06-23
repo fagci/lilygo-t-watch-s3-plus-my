@@ -361,7 +361,8 @@ class NotifSrvCb : public NimBLEServerCallbacks {
     void onDisconnect(NimBLEServer *, NimBLEConnInfo &, int) override {
         notif::connected = false;
         Serial.println("[BLE] disconnect");
-        NimBLEDevice::startAdvertising();      // снова видимы для реконнекта
+        // Не перезапускаем рекламу, если BLE намеренно заглушён на время WiFi-снифа
+        if (!notif::bleSuspended) NimBLEDevice::startAdvertising();   // снова видимы для реконнекта
     }
 };
 
@@ -594,5 +595,25 @@ void bleStop()
     bleScan->stop();
     bleScan->clearResults();
     ble::scanning = false;
+}
+
+// Заглушить BLE-радио на время WiFi-снифа (Recon): WiFi и BLE делят одну
+// антенну ESP32-S3, и постоянная реклама/коннект уведомлений съедает эфир.
+// Снимаем рекламу и рвём активный коннект; onDisconnect не переподнимет рекламу
+// из-за флага notif::bleSuspended. Парный bleRadioResume() возвращает рекламу.
+void bleRadioSuspend()
+{
+    if (notif::bleSuspended) return;
+    notif::bleSuspended = true;
+    bleStop();                                   // на всякий — стоп скана
+    NimBLEDevice::stopAdvertising();
+    NimBLEServer *srv = NimBLEDevice::getServer();
+    if (srv) for (uint16_t h : srv->getPeerDevices()) srv->disconnect(h);
+}
+void bleRadioResume()
+{
+    if (!notif::bleSuspended) return;
+    notif::bleSuspended = false;
+    NimBLEDevice::startAdvertising();
 }
 

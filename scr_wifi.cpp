@@ -18,6 +18,8 @@ namespace recon {
         uint8_t  enc;
         bool     hasBssid;
         bool     beacon;       // SSID/enc подтверждены маяком (иначе AP выведена из трафика)
+        uint64_t tsf;          // TSF из последнего маяка (мкс) = внутренние часы AP
+        bool     tsfReset;     // TSF откатился назад -> перезагрузка/подмена маяка
     };
     static const int MAX = 96;
     static Dev devs[MAX];
@@ -64,7 +66,7 @@ namespace recon {
     // Возврат пропавшего узла: ищем по MAC — найдём, обновим lastSeen, снова виден.
     static void touch(const uint8_t *mac, uint8_t kind, int8_t rssi, uint8_t ch,
                       const uint8_t *bssid, const char *ssid, uint8_t enc, bool create,
-                      bool beacon = false) {
+                      bool beacon = false, uint64_t tsf = 0) {
         if (mac[0] & 0x01) return;            // мультикаст/бродкаст — не узел
         if (ch == 0 || ch > 14) return;       // битый канал — мусорный кадр
 
@@ -87,7 +89,14 @@ namespace recon {
         if (bssid) { memcpy(d.bssid, bssid, 6); d.hasBssid = true; }
         if (ssid && ssid[0]) { strncpy(d.ssid, ssid, sizeof(d.ssid)-1); d.ssid[sizeof(d.ssid)-1]=0; }
         if (kind == K_AP) {
-            if (beacon) { d.beacon = true; if (enc > d.enc) d.enc = enc; }
+            if (beacon) {
+                d.beacon = true; if (enc > d.enc) d.enc = enc;
+                // TSF только растёт; откат назад (>1 c) = ребут точки или подменный маяк
+                if (tsf) {
+                    if (d.tsf && tsf + 1000000ULL < d.tsf) d.tsfReset = true;
+                    d.tsf = tsf;
+                }
+            }
             if (!d.hasBssid) { memcpy(d.bssid, mac, 6); d.hasBssid = true; }
         }
     }
@@ -158,8 +167,11 @@ namespace recon {
         if (ftype == 0 && (fsub == 8 || fsub == 5)) {     // beacon / probe-resp -> AP (подтверждена)
             char ssid[20]; uint8_t enc = E_OPEN;
             parseBeacon(fr + 24, len - 24, ssid, &enc);
+            // TSF — первые 8 байт тела маяка (uint64 LE, мкс от старта точки)
+            uint64_t tsf = 0;
+            if (len >= 32) for (int b = 0; b < 8; b++) tsf |= (uint64_t)fr[24 + b] << (8 * b);
             portENTER_CRITICAL(&mux);
-            touch(a2, K_AP, rssi, ch, a3, ssid, enc, true, true);
+            touch(a2, K_AP, rssi, ch, a3, ssid, enc, true, true, tsf);
             portEXIT_CRITICAL(&mux);
         } else if (ftype == 0 && (fsub == 0 || fsub == 2)) {   // (re)assoc req -> имя скрытой AP
             int off = (fsub == 0) ? 4 : 10;
@@ -419,6 +431,16 @@ namespace scrRecon {
         out[o] = 0;
     }
 
+    // Аптайм точки из TSF (мкс) -> компактно: "3d4h" / "5h12m" / "47m" / "-"
+    static void fmtUptime(uint64_t tsf, char *out, int outsz) {
+        if (!tsf) { snprintf(out, outsz, "-"); return; }
+        uint32_t s = (uint32_t)(tsf / 1000000ULL);
+        uint32_t d = s / 86400, h = (s % 86400) / 3600, m = (s % 3600) / 60;
+        if (d)      snprintf(out, outsz, "%lud%luh", (unsigned long)d, (unsigned long)h);
+        else if (h) snprintf(out, outsz, "%luh%lum", (unsigned long)h, (unsigned long)m);
+        else        snprintf(out, outsz, "%lum", (unsigned long)m);
+    }
+
     static void renderHeader(uint32_t now) {
         char t[64], h[120];
         if (view == V_APS) {
@@ -426,12 +448,13 @@ namespace scrRecon {
             char dw[24] = "";
             uint32_t dt = recon::cntDeauth + recon::cntDisassoc;
             if (dt) snprintf(dw, sizeof(dw), " " LV_SYMBOL_WARNING "%lu", (unsigned long)dt);
-            snprintf(t, sizeof(t), LV_SYMBOL_WIFI " RECON ch%d (%d)%s " LV_SYMBOL_RIGHT "dev",
+            // REFRESH = идёт перебор каналов (хоп) по всему диапазону
+            snprintf(t, sizeof(t), LV_SYMBOL_WIFI " " LV_SYMBOL_REFRESH "ch%d (%d)%s " LV_SYMBOL_RIGHT "dev",
                      recon::channel, visN, dw);
             lv_label_set_text(lblTitle, t);
             lv_label_set_text(lblHdr, "");
         } else if (view == V_DEVS) {
-            snprintf(t, sizeof(t), LV_SYMBOL_GPS " DEVICES (%d) " LV_SYMBOL_RIGHT "ap", visN);
+            snprintf(t, sizeof(t), LV_SYMBOL_GPS " " LV_SYMBOL_REFRESH "DEVICES (%d) " LV_SYMBOL_RIGHT "ap", visN);
             lv_label_set_text(lblTitle, t);
             lv_label_set_text(lblHdr, "");
         } else if (view == V_AP) {
@@ -440,8 +463,11 @@ namespace scrRecon {
                 recon::Dev &a = snap[ai];
                 char nm[18]; apName(a, nm, sizeof(nm));
                 snprintf(t, sizeof(t), LV_SYMBOL_LEFT " %s", nm);
-                snprintf(h, sizeof(h), "%.10s c%d %s %ddBm u%d",
-                         ouiVendor(a.mac), a.ch, encOf(a), a.rssi, clientsOf(selBssid, now));
+                // [cN] = залочены на канал AP (не хопим); up = аптайм из TSF; ⚠ = откат TSF
+                char up[12]; fmtUptime(a.tsf, up, sizeof(up));
+                snprintf(h, sizeof(h), "%s%.8s [c%d] %s %ddBm u%d up%s",
+                         a.tsfReset ? LV_SYMBOL_WARNING " " : "",
+                         ouiVendor(a.mac), a.ch, encOf(a), a.rssi, clientsOf(selBssid, now), up);
             } else { snprintf(t, sizeof(t), LV_SYMBOL_LEFT " AP lost"); h[0] = 0; }
             lv_label_set_text(lblTitle, t);
             lv_label_set_text(lblHdr, h);
@@ -550,7 +576,9 @@ namespace scrRecon {
 
         if (view == V_APS) {
             char nm[18]; apName(d, nm, sizeof(nm));
-            snprintf(buf, sizeof(buf), "%-.18s\n%s %4d ch%-2d %-4s u%2" PRIu32 " %3" PRIu32 "s",
+            // ⚠ перед именем = у точки откатывался TSF (ребут/подменный маяк)
+            snprintf(buf, sizeof(buf), "%s%-.18s\n%s %4d ch%-2d %-4s u%2" PRIu32 " %3" PRIu32 "s",
+                     d.tsfReset ? LV_SYMBOL_WARNING " " : "",
                      nm, bar, d.rssi, d.ch, encOf(d),
                      clientsOf(d.mac, now), age);         // [FIX 3] PRIu32 вместо %lu
         } else if (view == V_DEVS) {

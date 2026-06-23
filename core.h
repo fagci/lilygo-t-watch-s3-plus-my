@@ -160,7 +160,7 @@ void csiRequestChannel(int ch);
 void csiApplyChannel();
 void csiProcess();
 // Sniffer
-void snifferStart(bool hop, int fixedCh);
+void snifferStart(bool hop, int fixedCh = 0);
 void snifferStop();
 void snifferHopTick();
 void snifferApplyChanReq();

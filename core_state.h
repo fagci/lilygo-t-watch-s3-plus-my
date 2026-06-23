@@ -1,43 +1,8 @@
-// core_state.h — разделяемые namespace sniff/ble/notif.
+// core_state.h — разделяемые namespace ble/notif.
 // Переменные inline (C++17): одно определение на всю программу, живёт в заголовке,
 // доступно и ядру (core.cpp), и модулям (scr_*.cpp), и главному .ino.
 #pragma once
 #include "core.h"
-
-// ─── Снифферный учёт (WiFi) ──────────────────────────────────────────────────
-namespace sniff {
-    inline volatile uint32_t cntTotal = 0, cntMgmt = 0, cntCtrl = 0, cntData = 0;
-    inline volatile uint32_t cntProbe = 0, cntBeacon = 0, cntDeauth = 0, cntDisassoc = 0;
-    inline volatile uint32_t apFrom = 0, apTo = 0, apDeauth = 0;
-
-    struct MacEntry {
-        uint8_t  mac[6];
-        int8_t   rssi;
-        uint8_t  ch;
-        bool     isRandom;
-        uint32_t lastSeen;
-    };
-    inline constexpr int TABLE_SIZE = 128;
-    inline MacEntry      table[TABLE_SIZE];
-    inline volatile int  count = 0;
-    inline portMUX_TYPE  mux = portMUX_INITIALIZER_UNLOCKED;
-
-    // Клиенты выбранной точки (отдельный учёт от общей таблицы MAC)
-    struct Client {
-        uint8_t  mac[6];
-        int8_t   rssi;
-        uint32_t lastSeen;
-    };
-    inline constexpr int CLIENTS_MAX = 64;
-    inline Client        clients[CLIENTS_MAX];
-    inline volatile int  clientCount = 0;
-
-    inline bool     hopping  = false;
-    inline bool     started  = false;   // guard от двойного esp_wifi_start
-    inline int      channel  = 1;
-    inline uint32_t hopLast  = 0;
-    inline int      chanReq  = 0;        // запрос смены канала из тача (0 = нет)
-}
 
 // ─── BLE-сканер ──────────────────────────────────────────────────────────────
 namespace ble {

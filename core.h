@@ -1,6 +1,6 @@
 // core.h — общее ядро проекта. Инклудится из каждого app-модуля.
 // Содержит: внешние либы, cfg, алиасы шрифтов, extern-объявления глобалов
-// и прототипы общих функций (helpers, sniffer, gps, csi, ble, notif, manager).
+// и прототипы общих функций (helpers, oui, gps, ble, notif, manager).
 // Определения глобалов и общих функций — в core.cpp.
 #pragma once
 
@@ -61,10 +61,6 @@ namespace cfg {
     constexpr bool     NOTIF_VIBRO    = true;
     constexpr bool     NOTIF_BEEP     = true;
 
-    constexpr int      CSI_MAX_SUBC   = 64;
-    constexpr int      CSI_CHANNEL    = 1;
-    constexpr int      CSI_BARS       = 56;
-
     constexpr int      BATT_SAMPLES   = 120;
     constexpr uint32_t BATT_SAMPLE_MS = 60000;
 
@@ -104,18 +100,6 @@ namespace state {
     extern int16_t lpdRssi[cfg::LPD_CHANS];
     extern bool    lpdDirty;
 
-    extern volatile bool    csiReady;
-    extern int8_t   csiRaw[cfg::CSI_MAX_SUBC * 2];
-    extern int      csiLen;
-    extern int8_t   csiRssi;
-    extern float    csiAmp[cfg::CSI_MAX_SUBC];
-    extern float    csiPrevAmp[cfg::CSI_MAX_SUBC];
-    extern int      csiSubc;
-    extern float    csiFlatness;
-    extern float    csiMotion;
-    extern uint32_t csiPackets;
-    extern int      csiChannel;
-    extern int      csiChanRequest;
     extern volatile int wifiChannel;
 
     extern uint8_t       apBssid[6];
@@ -153,19 +137,6 @@ void gpsSyncTime();
 void gpsPowerOn();
 void gpsPowerOff();
 void readGPS();
-// CSI
-void csiStart();
-void csiStop();
-void csiRequestChannel(int ch);
-void csiApplyChannel();
-void csiProcess();
-// Sniffer
-void snifferStart(bool hop, int fixedCh = 0);
-void snifferStop();
-void snifferHopTick();
-void snifferApplyChanReq();
-void snifferResetCounters();
-void sniffDeviceCount(uint32_t windowMs, int *real, int *rnd);
 const char *ouiVendor(const uint8_t *mac);
 // Battery
 void batterySample();

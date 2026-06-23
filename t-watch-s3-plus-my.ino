@@ -76,13 +76,6 @@ static Screen screens[] = {
     { &scrLpd::root,     scrLpd::build,     scrLpd::update,     scrLpd::onEnter,     scrLpd::onExit,     "LPD433",  LV_SYMBOL_WIFI,         "Radio", RES_RADIO },
     { &scrGps::root,     scrGps::build,     scrGps::update,     nullptr,             nullptr,            "GPS",     LV_SYMBOL_GPS,          "Nav", RES_NONE },
     { &scrRecon::root,   scrRecon::build,   scrRecon::update,   scrRecon::onEnter,   scrRecon::onExit,   "Recon",   LV_SYMBOL_WIFI,         "WiFi", RES_WIFI },
-    { &scrAp::root,      scrAp::build,      scrAp::update,      scrAp::onEnter,      scrAp::onExit,      "APs",     LV_SYMBOL_WIFI,         "WiFi", RES_WIFI },
-    { &scrClients::root, scrClients::build, scrClients::update, scrClients::onEnter, scrClients::onExit, "Clients", LV_SYMBOL_WIFI,         "WiFi", RES_WIFI },
-    { &scrCsi::root,     scrCsi::build,     scrCsi::update,     scrCsi::onEnter,     scrCsi::onExit,     "CSI",     LV_SYMBOL_WIFI,         "WiFi", RES_WIFI },
-    { &scrRadar::root,   scrRadar::build,   scrRadar::update,   scrRadar::onEnter,   scrRadar::onExit,   "Radar",   LV_SYMBOL_WIFI,         "WiFi", RES_WIFI },
-    { &scrDeauth::root,  scrDeauth::build,  scrDeauth::update,  scrDeauth::onEnter,  scrDeauth::onExit,  "Deauth",  LV_SYMBOL_WARNING,      "WiFi", RES_WIFI },
-    { &scrPktRate::root, scrPktRate::build, scrPktRate::update, scrPktRate::onEnter, scrPktRate::onExit, "PktRate", LV_SYMBOL_WIFI,         "WiFi", RES_WIFI },
-    { &scrFinder::root,  scrFinder::build,  scrFinder::update,  scrFinder::onEnter,  scrFinder::onExit,  "Finder",  LV_SYMBOL_GPS,          "WiFi", RES_WIFI },
     { &scrBattery::root, scrBattery::build, scrBattery::update, nullptr,             nullptr,            "Battery", LV_SYMBOL_BATTERY_FULL, "System", RES_NONE },
     { &scrBle::root,     scrBle::build,     scrBle::update,     scrBle::onEnter,     scrBle::onExit,     "BLE",     LV_SYMBOL_BLUETOOTH,    "BLE", RES_BLE },
     { &scrNotif::root,   scrNotif::build,   scrNotif::update,   scrNotif::onEnter,   scrNotif::onExit,   "Notifs",  LV_SYMBOL_BELL,         "BLE", RES_BLE },
@@ -92,7 +85,7 @@ static const int SCREEN_COUNT = sizeof(screens) / sizeof(screens[0]);
 // Индексы экранов в screens[] для читаемости группировки
 enum {
     SCR_CLOCK = 0, SCR_SPEED, SCR_AUDIO, SCR_LPD, SCR_GPS,
-    SCR_RECON, SCR_AP, SCR_CLIENTS, SCR_CSI, SCR_RADAR, SCR_DEAUTH, SCR_PKT, SCR_FINDER, SCR_BATTERY, SCR_BLE, SCR_NOTIF
+    SCR_RECON, SCR_BATTERY, SCR_BLE, SCR_NOTIF
 };
 
 // GPS питаем пока активен экран Nav-группы. Поллинг из loop вместо onEnter/onExit:
@@ -248,24 +241,6 @@ static void gotoScreen(int scr)
 }
 
 // Тап по краю экрана меняет канал на RF-экранах (x-зона: лево=−, право=+)
-static void dispatchChannelTap(int x)
-{
-    int dir = (x < LV_HOR_RES / 3) ? -1 : (x > LV_HOR_RES * 2 / 3) ? +1 : 0;
-    if (dir == 0) return;
-    state::apSelected = false;          // ручная смена канала снимает цель
-    int ch = state::wifiChannel + dir;
-    if (ch > 13) ch = 1;
-    if (ch < 1)  ch = 13;
-    state::wifiChannel = ch;            // общий источник истины
-    switch (state::curScreen) {
-        case SCR_CSI:    csiRequestChannel(ch); break;
-        case SCR_DEAUTH:
-        case SCR_PKT:
-        case SCR_FINDER: sniff::chanReq = ch; break;
-        default: break;
-    }
-}
-
 static void wakeScreen()
 {
     state::screenOff    = false;
@@ -637,10 +612,8 @@ void setup()
                 else gotoScreen(SCR_CLOCK);
             } else if (abs(dx) < 20 && abs(dy) < 20) {
                 if      (state::curScreen == SCR_RECON) scrRecon::tap(navPressY);
-                else if (state::curScreen == SCR_AP)    scrAp::tapSelect(navPressY);
                 else if (state::curScreen == SCR_NOTIF) scrNotif::tap(navPressY);
                 else if (state::curScreen == SCR_CLOCK) { if (notif::count > 0) gotoScreen(SCR_NOTIF); }
-                else                                    dispatchChannelTap(navPressX);
             }
         }, LV_EVENT_RELEASED, NULL);
     }

@@ -1,667 +1,6 @@
-// scr_wifi.cpp — WiFi: разведка, точки, клиенты, CSI, радар, deauth, pkt-rate, finder.
+// scr_wifi.cpp — WiFi: единый инструмент Recon (точки/устройства/клиенты/досье),
+// со встроенным учётом deauth и RSSI-индикаторами в списке.
 #include "scr_wifi.h"
-
-namespace scrCsi {
-    lv_obj_t *root;
-    static lv_obj_t *lblTitle, *lblMetrics, *lblStatus;
-    static lv_obj_t *bars[cfg::CSI_BARS];
-
-    void build(lv_obj_t *parent) {
-        root = parent;
-        lv_obj_set_style_bg_color(root, lv_color_black(), 0);
-        lv_obj_set_style_pad_all(root, 0, 0);
-
-        lblTitle = makeLabel(root, UI_FONT, 0x888888,
-                             LV_ALIGN_TOP_MID, 0, cfg::CONTENT_TOP);
-        lv_label_set_text(lblTitle, LV_SYMBOL_WIFI " CSI ch1 " LV_SYMBOL_LEFT LV_SYMBOL_RIGHT);
-
-        lblMetrics = makeLabel(root, UI_FONT, 0x00CCFF,
-                               LV_ALIGN_TOP_LEFT, 4, cfg::CONTENT_TOP + 18);
-        lv_obj_set_width(lblMetrics, LV_HOR_RES - 8);
-        lv_label_set_long_mode(lblMetrics, LV_LABEL_LONG_WRAP);
-        lv_label_set_text(lblMetrics, "waiting for packets...");
-
-        lblStatus = makeLabel(root, UI_FONT, 0x00FF88,
-                              LV_ALIGN_TOP_MID, 0, cfg::CONTENT_TOP + 72);
-        lv_label_set_text(lblStatus, "");
-
-        // Бары спектра поднесущих на всю ширину
-        for (int i = 0; i < cfg::CSI_BARS; i++) {
-            int x0 = barX(i, cfg::CSI_BARS);
-            int x1 = barX(i + 1, cfg::CSI_BARS);
-            bars[i] = makeBar(root, lv_color_hex(0x00AAFF));
-            lv_obj_set_size(bars[i], (x1 - x0) > 1 ? (x1 - x0) : 1, 2);
-            lv_obj_set_pos(bars[i], x0, LV_VER_RES - 2);
-        }
-    }
-
-    void update() {
-        // Process fresh CSI frame if any
-        csiProcess();
-
-        // Title with current channel
-        char tbuf[40];
-        snprintf(tbuf, sizeof(tbuf),
-                 LV_SYMBOL_WIFI " CSI ch%d " LV_SYMBOL_LEFT LV_SYMBOL_RIGHT,
-                 state::csiChannel);
-        lv_label_set_text(lblTitle, tbuf);
-
-        int subc = state::csiSubc;
-        if (subc <= 0) {
-            lv_label_set_text(lblMetrics, "no CSI packets\n(need WiFi traffic nearby)");
-            // Сбрасываем бары в плоскую линию чтобы не висел старый спектр
-            for (int i = 0; i < cfg::CSI_BARS; i++) {
-                int x0 = barX(i, cfg::CSI_BARS);
-                int x1 = barX(i + 1, cfg::CSI_BARS);
-                lv_obj_set_size(bars[i], (x1 - x0) > 1 ? (x1 - x0) : 1, 2);
-                lv_obj_set_pos(bars[i], x0, LV_VER_RES - 2);
-            }
-            return;
-        }
-
-        // Спектр амплитуд: интерполяция subc поднесущих на CSI_BARS баров
-        int maxH = LV_VER_RES - (cfg::CONTENT_TOP + 100); 
-        float amax = 1.0f;
-        for (int i = 0; i < subc; i++)
-            if (state::csiAmp[i] > amax) amax = state::csiAmp[i];
-
-        for (int i = 0; i < cfg::CSI_BARS; i++) {
-            float src = (subc > 1) ? (float)i * (subc - 1) / (cfg::CSI_BARS - 1) : 0;
-            int   i0 = (int)src;
-            if (i0 < 0) i0 = 0;
-            if (i0 > subc - 1) i0 = subc - 1;
-            int   i1 = (i0 < subc - 1) ? i0 + 1 : i0;
-            float frac = src - i0;
-            float amp = state::csiAmp[i0] * (1 - frac) + state::csiAmp[i1] * frac;
-
-            int x0 = barX(i, cfg::CSI_BARS);
-            int x1 = barX(i + 1, cfg::CSI_BARS);
-            int w  = x1 - x0;
-            int h  = 2 + (int)(amp / amax * (maxH - 2));
-            h = constrain(h, 2, maxH);
-
-            lv_obj_set_size(bars[i], w > 1 ? w : 1, h);
-            lv_obj_set_pos(bars[i], x0, LV_VER_RES - h);
-
-            // цвет по высоте
-            uint8_t g = (uint8_t)(amp / amax * 255);
-            lv_obj_set_style_bg_color(bars[i], lv_color_make(0, g, 255 - g/2), 0);
-        }
-
-        // Метрики текстом
-        char buf[120];
-        snprintf(buf, sizeof(buf),
-                 LV_SYMBOL_WIFI " RSSI: %d dBm\n"
-                 "Flatness: %.0f%%  (subc:%d)\n"
-                 "Motion: %.0f%%  pkt:%lu",
-                 state::csiRssi,
-                 state::csiFlatness, subc,
-                 state::csiMotion,
-                 (unsigned long)state::csiPackets);
-        lv_label_set_text(lblMetrics, buf);
-
-        // Air status by motion
-        if (state::csiMotion < 8) {
-            lv_label_set_text(lblStatus, "Air: stable");
-            lv_obj_set_style_text_color(lblStatus, lv_color_hex(0x00FF88), 0);
-        } else if (state::csiMotion < 20) {
-            lv_label_set_text(lblStatus, "Air: activity");
-            lv_obj_set_style_text_color(lblStatus, lv_color_hex(0xFFAA00), 0);
-        } else {
-            lv_label_set_text(lblStatus, "Air: noisy");
-            lv_obj_set_style_text_color(lblStatus, lv_color_hex(0xFF4444), 0);
-        }
-    }
-
-    void onEnter() {
-        esp_wifi_start();     // запускаем радио (конфиг сохранён с setup)
-        delay(50);
-        csiStart();
-    }
-    void onExit()  {
-        csiStop();
-        esp_wifi_stop();      // останавливаем радио без deinit — экономия + стабильность
-    }
-}
-
-namespace scrRadar {
-    lv_obj_t *root;
-    static lv_obj_t *lblBig, *lblList;
-    void build(lv_obj_t *parent) {
-        root = parent;
-        lv_obj_set_style_bg_color(root, lv_color_black(), 0);
-
-        lv_obj_t *t = makeLabel(root, UI_FONT, 0x444444,
-                                LV_ALIGN_TOP_MID, 0, cfg::CONTENT_TOP);
-        lv_label_set_text(t, LV_SYMBOL_WIFI " RADAR (all ch)");
-
-        lblBig = makeLabel(root, BIG_FONT, 0x00CCFF,
-                           LV_ALIGN_TOP_MID, 0, cfg::CONTENT_TOP + 18);
-        lv_label_set_text(lblBig, "0");
-
-        lblList = makeLabel(root, UI_FONT, 0xAAAAAA,
-                            LV_ALIGN_TOP_LEFT, 4, cfg::CONTENT_TOP + 78);
-        lv_obj_set_width(lblList, LV_HOR_RES - 8);
-        lv_label_set_long_mode(lblList, LV_LABEL_LONG_WRAP);
-        lv_label_set_text(lblList, "scanning...");
-    }
-
-    void update() {
-        static uint32_t last = 0;
-        if (millis() - last < 300) return;   // цифра меняется редко, 50Гц не нужно
-        last = millis();
-
-        int real = 0, rnd = 0;
-        sniffDeviceCount(30000, &real, &rnd);   // за 30 сек
-
-        // Большая цифра = реальные устройства (с настоящим OUI)
-        char buf[16];
-        snprintf(buf, sizeof(buf), "%d", real);
-        lv_label_set_text(lblBig, buf);
-
-        // Топ реальных устройств по сигналу (рандомные пропускаем)
-        struct { int8_t rssi; uint8_t mac[6]; uint8_t ch; } top[5];
-        int tn = 0;
-        uint32_t now = millis();
-        portENTER_CRITICAL(&sniff::mux);
-        for (int i = 0; i < sniff::count; i++) {
-            if (now - sniff::table[i].lastSeen > 30000) continue;
-            if (sniff::table[i].isRandom) continue;     // только реальные
-            int8_t r = sniff::table[i].rssi;
-            int pos = tn;
-            for (int p = 0; p < tn; p++) if (r > top[p].rssi) { pos = p; break; }
-            if (tn < 5) tn++;
-            for (int q = (tn < 5 ? tn - 1 : 4); q > pos; q--) top[q] = top[q-1];
-            if (pos < 5) {
-                top[pos].rssi = r;
-                memcpy(top[pos].mac, sniff::table[i].mac, 6);
-                top[pos].ch = sniff::table[i].ch;
-            }
-        }
-        portEXIT_CRITICAL(&sniff::mux);
-
-        char list[200];
-        int off = snprintf(list, sizeof(list),
-                           "real devices /30s\n+%d random (phones)\n", rnd);
-        for (int i = 0; i < tn && off < (int)sizeof(list) - 1; i++) {
-            off += snprintf(list + off, sizeof(list) - off,
-                            "%s %ddBm ch%d\n",
-                            ouiVendor(top[i].mac), top[i].rssi, top[i].ch);
-        }
-        lv_label_set_text(lblList, list);
-    }
-
-    void onEnter() { snifferStart(true); }    // channel hopping
-    void onExit()  { snifferStop(); }
-}
-
-namespace scrDeauth {
-    lv_obj_t *root;
-    static lv_obj_t *lblTitle, *lblStatus, *lblStats;
-    static uint32_t baseDeauth = 0, rateDeauth = 0, lastT = 0;
-    static uint32_t baseAp = 0, rateAp = 0;
-
-    void build(lv_obj_t *parent) {
-        root = parent;
-        lv_obj_set_style_bg_color(root, lv_color_black(), 0);
-
-        lblTitle = makeLabel(root, UI_FONT, 0x444444,
-                             LV_ALIGN_TOP_MID, 0, cfg::CONTENT_TOP);
-        lv_label_set_text(lblTitle, LV_SYMBOL_WARNING " DEAUTH ch1");
-
-        lblStatus = makeLabel(root, BIG_FONT, 0x00FF88,
-                              LV_ALIGN_CENTER, 0, -10);
-        lv_label_set_text(lblStatus, "OK");
-
-        lblStats = makeLabel(root, UI_FONT, 0xAAAAAA,
-                             LV_ALIGN_BOTTOM_MID, 0, -16);
-        lv_obj_set_width(lblStats, LV_HOR_RES - 8);
-        lv_label_set_long_mode(lblStats, LV_LABEL_LONG_WRAP);
-        lv_label_set_text(lblStats, "");
-    }
-
-    void update() {
-        uint32_t now = millis();
-        if (now - lastT < 1000) return;   // весь экран обновляем раз в секунду
-        lastT = now;
-
-        // Цель выбрана — считаем deauth/disassoc с её участием, иначе по каналу
-        uint32_t rate;
-        char tb[48];
-        if (state::apSelected) {
-            rateAp = sniff::apDeauth - baseAp; baseAp = sniff::apDeauth;
-            rate = rateAp;
-            snprintf(tb, sizeof(tb), LV_SYMBOL_WARNING " %.12s", state::apSsid);
-        } else {
-            rateDeauth = sniff::cntDeauth - baseDeauth; baseDeauth = sniff::cntDeauth;
-            rate = rateDeauth;
-            snprintf(tb, sizeof(tb), LV_SYMBOL_WARNING " DEAUTH ch%d " LV_SYMBOL_LEFT LV_SYMBOL_RIGHT,
-                     sniff::channel);
-        }
-        lv_label_set_text(lblTitle, tb);
-
-        if (rate > 5) {
-            lv_label_set_text(lblStatus, "ATTACK");
-            lv_obj_set_style_text_color(lblStatus, lv_color_hex(0xFF4444), 0);
-        } else if (rate > 0) {
-            lv_label_set_text(lblStatus, "!");
-            lv_obj_set_style_text_color(lblStatus, lv_color_hex(0xFFAA00), 0);
-        } else {
-            lv_label_set_text(lblStatus, "OK");
-            lv_obj_set_style_text_color(lblStatus, lv_color_hex(0x00FF88), 0);
-        }
-
-        char buf[120];
-        snprintf(buf, sizeof(buf),
-                 "deauth/s: %lu\ntotal deauth: %lu\ndisassoc: %lu",
-                 (unsigned long)rate,
-                 (unsigned long)sniff::cntDeauth,
-                 (unsigned long)sniff::cntDisassoc);
-        lv_label_set_text(lblStats, buf);
-    }
-
-    void onEnter() {
-        snifferStart(false, state::wifiChannel);   // фикс. канал, без прыжков
-        baseDeauth = rateDeauth = 0;
-        baseAp = rateAp = 0;
-        lastT = millis();
-    }
-    void onExit()  { snifferStop(); }
-}
-
-namespace scrPktRate {
-    lv_obj_t *root;
-    static lv_obj_t *lblTitle, *lblRate, *lblBreak;
-    static uint32_t baseTotal = 0, baseMgmt = 0, baseData = 0, baseCtrl = 0;
-    static uint32_t rTotal = 0, rMgmt = 0, rData = 0, rCtrl = 0;
-    static uint32_t baseFrom = 0, baseTo = 0, rFrom = 0, rTo = 0;
-    static uint32_t lastT = 0;
-
-    void build(lv_obj_t *parent) {
-        root = parent;
-        lv_obj_set_style_bg_color(root, lv_color_black(), 0);
-
-        lblTitle = makeLabel(root, UI_FONT, 0x444444,
-                             LV_ALIGN_TOP_MID, 0, cfg::CONTENT_TOP);
-        lv_label_set_text(lblTitle, LV_SYMBOL_WIFI " PKT RATE");
-
-        lblRate = makeLabel(root, BIG_FONT, 0x00CCFF,
-                            LV_ALIGN_CENTER, 0, -10);
-        lv_label_set_text(lblRate, "0");
-
-        lblBreak = makeLabel(root, UI_FONT, 0xAAAAAA,
-                             LV_ALIGN_BOTTOM_MID, 0, -16);
-        lv_obj_set_width(lblBreak, LV_HOR_RES - 8);
-        lv_label_set_long_mode(lblBreak, LV_LABEL_LONG_WRAP);
-        lv_label_set_text(lblBreak, "");
-    }
-
-    void update() {
-        uint32_t now = millis();
-        if (now - lastT < 1000) return;   // весь экран обновляем раз в секунду
-        lastT = now;
-
-        // Смена режима цель/канал — обнуляем базы, пропускаем тик (без выброса)
-        static bool wasTgt = false;
-        if (state::apSelected != wasTgt) {
-            wasTgt = state::apSelected;
-            baseTotal = sniff::cntTotal; baseMgmt = sniff::cntMgmt;
-            baseData  = sniff::cntData;  baseCtrl = sniff::cntCtrl;
-            baseFrom  = sniff::apFrom;   baseTo   = sniff::apTo;
-            return;
-        }
-
-        char tb[48], rb[16], bb[100];
-        if (state::apSelected) {
-            rFrom = sniff::apFrom - baseFrom; baseFrom = sniff::apFrom;
-            rTo   = sniff::apTo   - baseTo;   baseTo   = sniff::apTo;
-            snprintf(tb, sizeof(tb), LV_SYMBOL_WIFI " %.12s", state::apSsid);
-            snprintf(rb, sizeof(rb), "%lu", (unsigned long)(rFrom + rTo));
-            snprintf(bb, sizeof(bb), "pkt/s AP c%d\nfrom:%lu to:%lu",
-                     state::wifiChannel, (unsigned long)rFrom, (unsigned long)rTo);
-        } else {
-            rTotal = sniff::cntTotal - baseTotal; baseTotal = sniff::cntTotal;
-            rMgmt  = sniff::cntMgmt  - baseMgmt;  baseMgmt  = sniff::cntMgmt;
-            rData  = sniff::cntData  - baseData;  baseData  = sniff::cntData;
-            rCtrl  = sniff::cntCtrl  - baseCtrl;  baseCtrl  = sniff::cntCtrl;
-            snprintf(tb, sizeof(tb), LV_SYMBOL_WIFI " PKT ch%d " LV_SYMBOL_LEFT LV_SYMBOL_RIGHT,
-                     sniff::channel);
-            snprintf(rb, sizeof(rb), "%lu", (unsigned long)rTotal);
-            snprintf(bb, sizeof(bb), "pkt/s total\nmgmt:%lu data:%lu ctrl:%lu",
-                     (unsigned long)rMgmt, (unsigned long)rData, (unsigned long)rCtrl);
-        }
-        lv_label_set_text(lblTitle, tb);
-        lv_label_set_text(lblRate, rb);
-        lv_label_set_text(lblBreak, bb);
-    }
-
-    void onEnter() {
-        snifferStart(false, state::wifiChannel);   // фикс. канал, без прыжков
-        baseTotal = baseMgmt = baseData = baseCtrl = 0;
-        baseFrom = baseTo = 0;
-        lastT = millis();
-    }
-    void onExit()  { snifferStop(); }
-}
-
-namespace scrFinder {
-    static const int ROWS = 5;
-    lv_obj_t *root;
-    static lv_obj_t *lblTitle;
-    static lv_obj_t *rName[ROWS], *rRssi[ROWS], *rBar[ROWS];
-
-    void build(lv_obj_t *parent) {
-        root = parent;
-        lv_obj_set_style_bg_color(root, lv_color_black(), 0);
-
-        lblTitle = makeLabel(root, UI_FONT, 0x444444,
-                             LV_ALIGN_TOP_MID, 0, cfg::CONTENT_TOP);
-        lv_label_set_text(lblTitle, LV_SYMBOL_GPS " FINDER");
-
-        // Строка на устройство: имя | полоса сигнала | RSSI — всё в одну линию
-        const int top = cfg::CONTENT_TOP + 24;
-        const int rh  = 30;
-        for (int i = 0; i < ROWS; i++) {
-            int y = top + i * rh;
-            rName[i] = makeLabel(root, UI_FONT, 0xCCCCCC, LV_ALIGN_TOP_LEFT, 4, y);
-            rRssi[i] = makeLabel(root, UI_FONT, 0x00FF88, LV_ALIGN_TOP_RIGHT, -4, y);
-
-            lv_obj_t *bar = lv_bar_create(root);
-            lv_obj_set_size(bar, LV_HOR_RES - 8, 8);
-            lv_obj_align(bar, LV_ALIGN_TOP_LEFT, 4, y + 18);
-            lv_bar_set_range(bar, -100, -30);
-            lv_obj_set_style_bg_color(bar, lv_color_hex(0x222222), LV_PART_MAIN);
-            lv_obj_set_style_bg_color(bar, lv_color_hex(0x00FF88), LV_PART_INDICATOR);
-            lv_obj_set_style_radius(bar, 2, LV_PART_MAIN);
-            lv_obj_set_style_radius(bar, 2, LV_PART_INDICATOR);
-            rBar[i] = bar;
-        }
-    }
-
-    static void showRow(int i, bool on) {
-        if (on) { lv_obj_clear_flag(rName[i], LV_OBJ_FLAG_HIDDEN);
-                  lv_obj_clear_flag(rRssi[i], LV_OBJ_FLAG_HIDDEN);
-                  lv_obj_clear_flag(rBar[i],  LV_OBJ_FLAG_HIDDEN); }
-        else    { lv_obj_add_flag(rName[i], LV_OBJ_FLAG_HIDDEN);
-                  lv_obj_add_flag(rRssi[i], LV_OBJ_FLAG_HIDDEN);
-                  lv_obj_add_flag(rBar[i],  LV_OBJ_FLAG_HIDDEN); }
-    }
-
-    void update() {
-        static uint32_t last = 0;
-        if (millis() - last < 300) return;
-        last = millis();
-
-        char tb[40];
-        snprintf(tb, sizeof(tb), LV_SYMBOL_GPS " FINDER ch%d " LV_SYMBOL_LEFT LV_SYMBOL_RIGHT,
-                 sniff::channel);
-        lv_label_set_text(lblTitle, tb);
-
-        // топ-5 устройств на текущем канале по RSSI
-        struct { int8_t rssi; uint8_t mac[6]; } top[ROWS];
-        int tn = 0;
-        uint32_t now = millis();
-        portENTER_CRITICAL(&sniff::mux);
-        for (int i = 0; i < sniff::count; i++) {
-            if (sniff::table[i].ch != sniff::channel) continue;
-            if (now - sniff::table[i].lastSeen > 10000) continue;
-            int8_t r = sniff::table[i].rssi;
-            int pos = tn;
-            for (int p = 0; p < tn; p++) if (r > top[p].rssi) { pos = p; break; }
-            if (tn < ROWS) tn++;
-            for (int q = (tn < ROWS ? tn - 1 : ROWS - 1); q > pos; q--) top[q] = top[q-1];
-            if (pos < ROWS) { top[pos].rssi = r; memcpy(top[pos].mac, sniff::table[i].mac, 6); }
-        }
-        portEXIT_CRITICAL(&sniff::mux);
-
-        for (int i = 0; i < ROWS; i++) {
-            if (i < tn) {
-                lv_label_set_text(rName[i], ouiVendor(top[i].mac));
-                char rb[8]; snprintf(rb, sizeof(rb), "%d", top[i].rssi);
-                lv_label_set_text(rRssi[i], rb);
-                lv_bar_set_value(rBar[i], constrain((int)top[i].rssi, -100, -30), LV_ANIM_OFF);
-                showRow(i, true);
-            } else {
-                showRow(i, false);
-            }
-        }
-        if (tn == 0) {
-            showRow(0, true);
-            lv_obj_add_flag(rBar[0],  LV_OBJ_FLAG_HIDDEN);
-            lv_obj_add_flag(rRssi[0], LV_OBJ_FLAG_HIDDEN);
-            lv_label_set_text(rName[0], "no devices");
-        }
-    }
-
-    void onEnter() { snifferStart(false, state::wifiChannel); }
-    void onExit()  { snifferStop(); }
-}
-
-namespace scrAp {
-    lv_obj_t *root;
-    static lv_obj_t *lblTitle, *lblList;
-    static const int AP_MAX_SHOW = 12;                  // влезает в высоту экрана
-    static const int AP_LIST_TOP = cfg::CONTENT_TOP + 20;
-    static const int AP_LINE_H   = 18;                  // высота строки montserrat_14
-
-    struct Row { uint8_t bssid[6]; uint8_t ch; int8_t rssi; uint8_t enc; char ssid[18]; };
-    static Row rows[AP_MAX_SHOW];
-    static int rowCount = 0;
-
-    // Короткое имя типа шифрования
-    static const char *encShort(uint8_t m) {
-        switch (m) {
-            case WIFI_AUTH_OPEN:          return "open";
-            case WIFI_AUTH_WEP:           return "WEP";
-            case WIFI_AUTH_WPA_PSK:       return "WPA";
-            case WIFI_AUTH_WPA2_PSK:      return "WPA2";
-            case WIFI_AUTH_WPA_WPA2_PSK:  return "WPA2";
-            case WIFI_AUTH_WPA3_PSK:      return "WPA3";
-            case WIFI_AUTH_WPA2_WPA3_PSK: return "WPA3";
-            default:                      return "ent?";
-        }
-    }
-
-    void build(lv_obj_t *parent) {
-        root = parent;
-        lv_obj_set_style_bg_color(root, lv_color_black(), 0);
-
-        lblTitle = makeLabel(root, UI_FONT, 0x444444,
-                             LV_ALIGN_TOP_MID, 0, cfg::CONTENT_TOP);
-        lv_label_set_text(lblTitle, LV_SYMBOL_WIFI " ACCESS POINTS");
-
-        lblList = makeLabel(root, UI_FONT, 0x00CCFF,
-                            LV_ALIGN_TOP_LEFT, 4, AP_LIST_TOP);
-        lv_obj_set_width(lblList, LV_HOR_RES - 8);
-        lv_label_set_long_mode(lblList, LV_LABEL_LONG_WRAP);
-        lv_label_set_text(lblList, "scanning...");
-    }
-
-    // Стоковый шрифт LVGL — только латиница, чистим прочие байты
-    static void asciiCopy(char *dst, int dstlen, const char *src) {
-        int i = 0;
-        for (; src[i] && i < dstlen - 1; i++) {
-            char c = src[i];
-            dst[i] = (c >= 0x20 && c < 0x7F) ? c : '?';
-        }
-        dst[i] = 0;
-    }
-
-    static void kickScan() {
-        WiFi.scanDelete();
-        WiFi.scanNetworks(true, true);   // async, со скрытыми
-    }
-
-    static void render() {
-        char list[480];
-        int off = 0;
-        if (rowCount == 0) off = snprintf(list, sizeof(list), "no APs");
-        for (int i = 0; i < rowCount && off < (int)sizeof(list) - 1; i++) {
-            bool tgt = state::apSelected && memcmp(rows[i].bssid, state::apBssid, 6) == 0;
-            off += snprintf(list + off, sizeof(list) - off, "%s%4d %2d %-4s %.10s\n",
-                            tgt ? ">" : " ", rows[i].rssi, rows[i].ch,
-                            encShort(rows[i].enc), rows[i].ssid);
-        }
-        lv_label_set_text(lblList, list);
-    }
-
-    // Тап по строке: выбрать точку целью (повтор по цели — снять)
-    void tapSelect(int y) {
-        // Новая цель/снятие — клиенты прошлой точки больше не релевантны
-        portENTER_CRITICAL(&sniff::mux);
-        sniff::clientCount = 0;
-        portEXIT_CRITICAL(&sniff::mux);
-
-        int i = (y - AP_LIST_TOP) / AP_LINE_H;
-        if (i < 0 || i >= rowCount) { state::apSelected = false; render(); return; }
-        bool same = state::apSelected && memcmp(rows[i].bssid, state::apBssid, 6) == 0;
-        if (same) {
-            state::apSelected = false;
-        } else {
-            memcpy(state::apBssid, rows[i].bssid, 6);
-            strncpy(state::apSsid, rows[i].ssid, sizeof(state::apSsid) - 1);
-            state::apSsid[sizeof(state::apSsid) - 1] = 0;
-            state::wifiChannel = rows[i].ch;   // инструменты пойдут на канал точки
-            state::apSelected  = true;
-        }
-        render();
-    }
-
-    void update() {
-        static uint32_t last = 0;
-        if (millis() - last < 500) return;
-        last = millis();
-
-        int n = WiFi.scanComplete();
-        if (n == WIFI_SCAN_RUNNING) return;
-        if (n < 0) { kickScan(); return; }   // не запущен/ошибка — пере-старт
-
-        // Индексы, сортировка вставками по RSSI убыванием
-        int idx[64];
-        int m = n > 64 ? 64 : n;
-        for (int i = 0; i < m; i++) idx[i] = i;
-        for (int i = 1; i < m; i++) {
-            int k = idx[i], j = i - 1;
-            while (j >= 0 && WiFi.RSSI(idx[j]) < WiFi.RSSI(k)) { idx[j+1] = idx[j]; j--; }
-            idx[j+1] = k;
-        }
-
-        rowCount = 0;
-        for (int i = 0; i < m && rowCount < AP_MAX_SHOW; i++) {
-            int e = idx[i];
-            Row &r = rows[rowCount++];
-            memcpy(r.bssid, WiFi.BSSID(e), 6);
-            r.ch   = WiFi.channel(e);
-            r.rssi = WiFi.RSSI(e);
-            r.enc  = WiFi.encryptionType(e);
-            String s = WiFi.SSID(e);
-            asciiCopy(r.ssid, sizeof(r.ssid), s.length() ? s.c_str() : "<hidden>");
-        }
-        render();
-
-        char tb[48];
-        if (state::apSelected)
-            snprintf(tb, sizeof(tb), LV_SYMBOL_WIFI " %d  " LV_SYMBOL_OK " %.10s", n, state::apSsid);
-        else
-            snprintf(tb, sizeof(tb), LV_SYMBOL_WIFI " APs (%d)  tap=target", n);
-        lv_label_set_text(lblTitle, tb);
-
-        kickScan();   // следующий проход
-    }
-
-    void onEnter() {
-        esp_wifi_set_mode(WIFI_MODE_STA);
-        esp_wifi_start();        // реально поднимаем STA (Arduino-флаг рассинхронен с raw stop)
-        delay(50);
-        WiFi.scanDelete();
-        WiFi.scanNetworks(true, true);
-    }
-    void onExit() {
-        esp_wifi_scan_stop();
-        esp_wifi_set_mode(WIFI_MODE_AP);   // как после setup
-        esp_wifi_stop();
-    }
-}
-
-namespace scrClients {
-    lv_obj_t *root;
-    static lv_obj_t *lblTitle, *lblBig, *lblList;
-    static const uint32_t CLIENT_WIN = 30000;   // окно «живых» клиентов
-
-    void build(lv_obj_t *parent) {
-        root = parent;
-        lv_obj_set_style_bg_color(root, lv_color_black(), 0);
-
-        lblTitle = makeLabel(root, UI_FONT, 0x444444,
-                             LV_ALIGN_TOP_MID, 0, cfg::CONTENT_TOP);
-        lv_label_set_text(lblTitle, LV_SYMBOL_WIFI " CLIENTS");
-
-        lblBig = makeLabel(root, BIG_FONT, 0x00CCFF,
-                           LV_ALIGN_TOP_MID, 0, cfg::CONTENT_TOP + 18);
-        lv_label_set_text(lblBig, "-");
-
-        lblList = makeLabel(root, UI_FONT, 0xAAAAAA,
-                            LV_ALIGN_TOP_LEFT, 4, cfg::CONTENT_TOP + 76);
-        lv_obj_set_width(lblList, LV_HOR_RES - 8);
-        lv_label_set_long_mode(lblList, LV_LABEL_LONG_WRAP);
-        lv_label_set_text(lblList, "");
-    }
-
-    void update() {
-        static uint32_t last = 0;
-        if (millis() - last < 700) return;
-        last = millis();
-
-        if (!state::apSelected) {
-            lv_label_set_text(lblTitle, LV_SYMBOL_WIFI " CLIENTS");
-            lv_label_set_text(lblBig, "-");
-            lv_label_set_text(lblList, "pick AP target\non ACCESS POINTS");
-            return;
-        }
-
-        // Снимок живых клиентов под спинлоком, сортировка/вывод — вне него
-        struct { int8_t rssi; uint8_t mac[6]; } snap[sniff::CLIENTS_MAX];
-        int sn = 0;
-        uint32_t now = millis();
-        portENTER_CRITICAL(&sniff::mux);
-        for (int i = 0; i < sniff::clientCount; i++) {
-            if (now - sniff::clients[i].lastSeen > CLIENT_WIN) continue;
-            snap[sn].rssi = sniff::clients[i].rssi;
-            memcpy(snap[sn].mac, sniff::clients[i].mac, 6);
-            sn++;
-        }
-        portEXIT_CRITICAL(&sniff::mux);
-
-        // Сортировка по RSSI убыванием (ближе — выше)
-        for (int i = 1; i < sn; i++) {
-            auto k = snap[i]; int j = i - 1;
-            while (j >= 0 && snap[j].rssi < k.rssi) { snap[j+1] = snap[j]; j--; }
-            snap[j+1] = k;
-        }
-
-        char tb[48];
-        snprintf(tb, sizeof(tb), LV_SYMBOL_WIFI " %.10s c%d", state::apSsid, state::wifiChannel);
-        lv_label_set_text(lblTitle, tb);
-
-        char nb[8];
-        snprintf(nb, sizeof(nb), "%d", sn);
-        lv_label_set_text(lblBig, nb);
-
-        char list[300];
-        int off = 0;
-        if (sn == 0) off = snprintf(list, sizeof(list), "no clients seen");
-        for (int i = 0; i < sn && i < 7 && off < (int)sizeof(list) - 1; i++) {
-            off += snprintf(list + off, sizeof(list) - off, "%-9s %d\n",
-                            ouiVendor(snap[i].mac), snap[i].rssi);
-        }
-        lv_label_set_text(lblList, list);
-    }
-
-    void onEnter() {
-        if (state::apSelected) snifferStart(false, state::wifiChannel);
-    }
-    void onExit() { snifferStop(); }
-}
 
 namespace recon {
     enum Kind : uint8_t { K_UNKNOWN = 0, K_STA = 1, K_AP = 2 };
@@ -695,6 +34,9 @@ namespace recon {
     static volatile bool hopping = true;
     static volatile int  channel = 1;
     static uint32_t hopLast = 0;
+
+    // Учёт атак: deauth/disassoc-фреймы за сессию (из собственного колбэка)
+    static volatile uint32_t cntDeauth = 0, cntDisassoc = 0;
 
     static const char *encStr(uint8_t e) {
         switch (e) { case E_OPEN: return "open"; case E_WEP: return "WEP";
@@ -832,6 +174,11 @@ namespace recon {
             touch(a2, K_STA, rssi, ch, nullptr, nullptr, 0, true);
             if (ssid[0]) probeLog(a2, ssid, rssi);         // направленный probe = сеть из PNL
             portEXIT_CRITICAL(&mux);
+        } else if (ftype == 0 && (fsub == 12 || fsub == 10)) {   // deauth / disassoc
+            if (fsub == 12) cntDeauth++; else cntDisassoc++;
+            portENTER_CRITICAL(&mux);
+            touch(a2, K_UNKNOWN, rssi, ch, nullptr, nullptr, 0, false);
+            portEXIT_CRITICAL(&mux);
         } else if (ftype == 2) {                          // data: STA<->AP (AP выводим из трафика)
             uint8_t ds = fr[1] & 3;
             portENTER_CRITICAL(&mux);
@@ -850,6 +197,7 @@ namespace recon {
     static void start(int fixedCh) {
         if (started) return;
         portENTER_CRITICAL(&mux); count = 0; probeN = 0; portEXIT_CRITICAL(&mux);
+        cntDeauth = cntDisassoc = 0;
         hopping = (fixedCh == 0);
         channel = fixedCh ? fixedCh : 1;
         hopLast = millis();
@@ -1059,11 +407,27 @@ namespace scrRecon {
         else snprintf(out, n, "%02X%02X%02X", a.mac[3], a.mac[4], a.mac[5]);
     }
 
+    // Компактный индикатор RSSI: 4 ячейки '•' (есть сигнал) / '·' (нет).
+    // -90dBm и слабее -> пусто, -34dBm и сильнее -> полный (символы из шрифта).
+    static void rssiBar(int8_t rssi, char *out, int outsz) {
+        const int cells = 4;
+        int f = (rssi + 90) / 14;
+        if (f < 0) f = 0; if (f > cells) f = cells;
+        int o = 0;
+        for (int i = 0; i < cells && o < outsz - 3; i++)
+            o += snprintf(out + o, outsz - o, "%s", i < f ? "\xE2\x80\xA2" : "\xC2\xB7");
+        out[o] = 0;
+    }
+
     static void renderHeader(uint32_t now) {
-        char t[44], h[120];
+        char t[64], h[120];
         if (view == V_APS) {
-            snprintf(t, sizeof(t), LV_SYMBOL_WIFI " RECON ch%d (%d) " LV_SYMBOL_RIGHT "dev",
-                     recon::channel, visN);
+            // Счётчик атак deauth/disassoc прямо в титуле (предупреждение, если есть)
+            char dw[24] = "";
+            uint32_t dt = recon::cntDeauth + recon::cntDisassoc;
+            if (dt) snprintf(dw, sizeof(dw), " " LV_SYMBOL_WARNING "%lu", (unsigned long)dt);
+            snprintf(t, sizeof(t), LV_SYMBOL_WIFI " RECON ch%d (%d)%s " LV_SYMBOL_RIGHT "dev",
+                     recon::channel, visN, dw);
             lv_label_set_text(lblTitle, t);
             lv_label_set_text(lblHdr, "");
         } else if (view == V_DEVS) {
@@ -1180,22 +544,23 @@ namespace scrRecon {
         uint32_t age = (now - d.lastSeen) / 1000;
         if (age > 999) age = 999;
 
-        char buf[96];
+        char buf[120];
         buf[0] = '\0';                                    // [FIX 4]
+        char bar[16]; rssiBar(d.rssi, bar, sizeof(bar));  // мини-индикатор сигнала (finder)
 
         if (view == V_APS) {
             char nm[18]; apName(d, nm, sizeof(nm));
-            snprintf(buf, sizeof(buf), "%-.18s\n%4d ch%-2d %-4s u%2" PRIu32 " %3" PRIu32 "s",
-                     nm, d.rssi, d.ch, encOf(d),
+            snprintf(buf, sizeof(buf), "%-.18s\n%s %4d ch%-2d %-4s u%2" PRIu32 " %3" PRIu32 "s",
+                     nm, bar, d.rssi, d.ch, encOf(d),
                      clientsOf(d.mac, now), age);         // [FIX 3] PRIu32 вместо %lu
         } else if (view == V_DEVS) {
             char dl[18]; devLabel(d.mac, dl, sizeof(dl));
-            snprintf(buf, sizeof(buf), "%-.18s\n%4d %6" PRIu32 "p %2dnet %3" PRIu32 "s",
-                     dl, d.rssi, d.packets, pnlCount(d.mac), age);
+            snprintf(buf, sizeof(buf), "%-.18s\n%s %4d %6" PRIu32 "p %2dnet %3" PRIu32 "s",
+                     dl, bar, d.rssi, d.packets, pnlCount(d.mac), age);
         } else {   // V_AP — клиенты точки
             char dl[18]; devLabel(d.mac, dl, sizeof(dl));
-            snprintf(buf, sizeof(buf), "%-.18s\n%4d %6" PRIu32 "p %3" PRIu32 "s",
-                     dl, d.rssi, d.packets, age);
+            snprintf(buf, sizeof(buf), "%-.18s\n%s %4d %6" PRIu32 "p %3" PRIu32 "s",
+                     dl, bar, d.rssi, d.packets, age);
         }
 
         buf[sizeof(buf) - 1] = '\0';                     // [FIX 4]
@@ -1228,6 +593,11 @@ namespace scrRecon {
         if (view == V_APS) {
             memcpy(selBssid, d.mac, 6); view = V_AP; scrollRow = 0;
             recon::setLock(d.ch); resetChart();
+            // Drill в точку = выбор глобальной цели для Deauth/PktRate/Finder и сниффера
+            state::apSelected = true;
+            memcpy(state::apBssid, d.mac, 6);
+            apName(d, state::apSsid, sizeof(state::apSsid));
+            state::wifiChannel = d.ch;
         } else if (view == V_DEVS) {
             memcpy(selSta, d.mac, 6); view = V_STA; staFrom = V_DEVS; scrollRow = 0;
             recon::setLock(d.ch); resetChart();

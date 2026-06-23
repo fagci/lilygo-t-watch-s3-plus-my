@@ -278,12 +278,19 @@ namespace recon {
         if (ch) { channel = ch; esp_wifi_set_channel(ch, WIFI_SECOND_CHAN_NONE); }
     }
     void hopTick() {              // из loop (безопасный контекст)
-        if (!started || !hopping) return;
+        if (!started) return;
         if (millis() - hopLast < 250) return;
         hopLast = millis();
-        int c = channel + 1; if (c > 13) c = 1;
-        channel = c;
-        esp_wifi_set_channel(c, WIFI_SECOND_CHAN_NONE);
+        if (hopping) {            // перебор каналов
+            int c = channel + 1; if (c > 13) c = 1; channel = c;
+            esp_wifi_set_channel(channel, WIFI_SECOND_CHAN_NONE);
+            return;
+        }
+        // Залочены (смотрим клиентов точки): держим канал жёстко. Переставляем
+        // только при реальном дрейфе (драйвер/коэкзистенс BLE могли сбросить).
+        uint8_t pri = 0; wifi_second_chan_t sec;
+        if (esp_wifi_get_channel(&pri, &sec) == ESP_OK && pri != channel)
+            esp_wifi_set_channel(channel, WIFI_SECOND_CHAN_NONE);
     }
 }
 

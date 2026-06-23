@@ -12,7 +12,8 @@
  *   Nav    - спидометр, GPS
  *   Audio  - спектр
  *   Radio  - LPD433
- *   WiFi   - разведка (drill-down), точки, клиенты, CSI, радар, deauth, pkt-rate, finder
+ *   WiFi   - Recon: единый drill-down (точки -> устройства -> клиенты -> досье),
+ *            встроены RSSI-бары и счётчик deauth
  *   System - батарея
  *
  * Статусбар (сверху): иконки слева, батарея справа
@@ -645,8 +646,7 @@ void setup()
     state::gpsActive = false;
 
     // WiFi инициализируем один раз, но радио сразу останавливаем (экономия).
-    // На CSI-экране радио запускается через esp_wifi_start (без полного deinit,
-    // иначе при переинициализации меняется раскладка поднесущих CSI).
+    // Recon поднимает промискуитет через esp_wifi_start без полного deinit.
     WiFi.mode(WIFI_AP);
     esp_wifi_stop();
 
@@ -744,8 +744,6 @@ void loop()
     applyGpsPower();
     readGPS();
     batterySample();
-    snifferHopTick();
-    snifferApplyChanReq();
     recon::hopTick();
     watch.loop();
     lv_task_handler();

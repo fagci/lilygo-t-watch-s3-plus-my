@@ -1,39 +1,7 @@
-// scr_wifi.h — WiFi: универсальная разведка (Recon) + дашборды radar/deauth/pkt/finder.
-// Интерфейс для screens[].
+// scr_wifi.h — WiFi: единый универсальный инструмент Recon (точки/устройства/
+// клиенты/досье; deauth-счётчик и RSSI-бары встроены). Интерфейс для screens[].
 #pragma once
 #include "core_state.h"
-
-namespace scrRadar {
-    extern lv_obj_t *root;
-    void build(lv_obj_t *parent);
-    void update();
-    void onEnter();
-    void onExit();
-}
-
-namespace scrDeauth {
-    extern lv_obj_t *root;
-    void build(lv_obj_t *parent);
-    void update();
-    void onEnter();
-    void onExit();
-}
-
-namespace scrPktRate {
-    extern lv_obj_t *root;
-    void build(lv_obj_t *parent);
-    void update();
-    void onEnter();
-    void onExit();
-}
-
-namespace scrFinder {
-    extern lv_obj_t *root;
-    void build(lv_obj_t *parent);
-    void update();
-    void onEnter();
-    void onExit();
-}
 
 namespace recon {
     void hopTick();

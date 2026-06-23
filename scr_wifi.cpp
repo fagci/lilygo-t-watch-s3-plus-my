@@ -1,318 +1,6 @@
-// scr_wifi.cpp — WiFi: разведка, точки, клиенты, CSI, радар, deauth, pkt-rate, finder.
+// scr_wifi.cpp — WiFi: единый инструмент Recon (точки/устройства/клиенты/досье),
+// со встроенным учётом deauth и RSSI-индикаторами в списке.
 #include "scr_wifi.h"
-
-namespace scrRadar {
-    lv_obj_t *root;
-    static lv_obj_t *lblBig, *lblList;
-    void build(lv_obj_t *parent) {
-        root = parent;
-        lv_obj_set_style_bg_color(root, lv_color_black(), 0);
-
-        lv_obj_t *t = makeLabel(root, UI_FONT, 0x444444,
-                                LV_ALIGN_TOP_MID, 0, cfg::CONTENT_TOP);
-        lv_label_set_text(t, LV_SYMBOL_WIFI " RADAR (all ch)");
-
-        lblBig = makeLabel(root, BIG_FONT, 0x00CCFF,
-                           LV_ALIGN_TOP_MID, 0, cfg::CONTENT_TOP + 18);
-        lv_label_set_text(lblBig, "0");
-
-        lblList = makeLabel(root, UI_FONT, 0xAAAAAA,
-                            LV_ALIGN_TOP_LEFT, 4, cfg::CONTENT_TOP + 78);
-        lv_obj_set_width(lblList, LV_HOR_RES - 8);
-        lv_label_set_long_mode(lblList, LV_LABEL_LONG_WRAP);
-        lv_label_set_text(lblList, "scanning...");
-    }
-
-    void update() {
-        static uint32_t last = 0;
-        if (millis() - last < 300) return;   // цифра меняется редко, 50Гц не нужно
-        last = millis();
-
-        int real = 0, rnd = 0;
-        sniffDeviceCount(30000, &real, &rnd);   // за 30 сек
-
-        // Большая цифра = реальные устройства (с настоящим OUI)
-        char buf[16];
-        snprintf(buf, sizeof(buf), "%d", real);
-        lv_label_set_text(lblBig, buf);
-
-        // Топ реальных устройств по сигналу (рандомные пропускаем)
-        struct { int8_t rssi; uint8_t mac[6]; uint8_t ch; } top[5];
-        int tn = 0;
-        uint32_t now = millis();
-        portENTER_CRITICAL(&sniff::mux);
-        for (int i = 0; i < sniff::count; i++) {
-            if (now - sniff::table[i].lastSeen > 30000) continue;
-            if (sniff::table[i].isRandom) continue;     // только реальные
-            int8_t r = sniff::table[i].rssi;
-            int pos = tn;
-            for (int p = 0; p < tn; p++) if (r > top[p].rssi) { pos = p; break; }
-            if (tn < 5) tn++;
-            for (int q = (tn < 5 ? tn - 1 : 4); q > pos; q--) top[q] = top[q-1];
-            if (pos < 5) {
-                top[pos].rssi = r;
-                memcpy(top[pos].mac, sniff::table[i].mac, 6);
-                top[pos].ch = sniff::table[i].ch;
-            }
-        }
-        portEXIT_CRITICAL(&sniff::mux);
-
-        char list[200];
-        int off = snprintf(list, sizeof(list),
-                           "real devices /30s\n+%d random (phones)\n", rnd);
-        for (int i = 0; i < tn && off < (int)sizeof(list) - 1; i++) {
-            off += snprintf(list + off, sizeof(list) - off,
-                            "%s %ddBm ch%d\n",
-                            ouiVendor(top[i].mac), top[i].rssi, top[i].ch);
-        }
-        lv_label_set_text(lblList, list);
-    }
-
-    void onEnter() { snifferStart(true); }    // channel hopping
-    void onExit()  { snifferStop(); }
-}
-
-namespace scrDeauth {
-    lv_obj_t *root;
-    static lv_obj_t *lblTitle, *lblStatus, *lblStats;
-    static uint32_t baseDeauth = 0, rateDeauth = 0, lastT = 0;
-    static uint32_t baseAp = 0, rateAp = 0;
-
-    void build(lv_obj_t *parent) {
-        root = parent;
-        lv_obj_set_style_bg_color(root, lv_color_black(), 0);
-
-        lblTitle = makeLabel(root, UI_FONT, 0x444444,
-                             LV_ALIGN_TOP_MID, 0, cfg::CONTENT_TOP);
-        lv_label_set_text(lblTitle, LV_SYMBOL_WARNING " DEAUTH ch1");
-
-        lblStatus = makeLabel(root, BIG_FONT, 0x00FF88,
-                              LV_ALIGN_CENTER, 0, -10);
-        lv_label_set_text(lblStatus, "OK");
-
-        lblStats = makeLabel(root, UI_FONT, 0xAAAAAA,
-                             LV_ALIGN_BOTTOM_MID, 0, -16);
-        lv_obj_set_width(lblStats, LV_HOR_RES - 8);
-        lv_label_set_long_mode(lblStats, LV_LABEL_LONG_WRAP);
-        lv_label_set_text(lblStats, "");
-    }
-
-    void update() {
-        uint32_t now = millis();
-        if (now - lastT < 1000) return;   // весь экран обновляем раз в секунду
-        lastT = now;
-
-        // Цель выбрана — считаем deauth/disassoc с её участием, иначе по каналу
-        uint32_t rate;
-        char tb[48];
-        if (state::apSelected) {
-            rateAp = sniff::apDeauth - baseAp; baseAp = sniff::apDeauth;
-            rate = rateAp;
-            snprintf(tb, sizeof(tb), LV_SYMBOL_WARNING " %.12s", state::apSsid);
-        } else {
-            rateDeauth = sniff::cntDeauth - baseDeauth; baseDeauth = sniff::cntDeauth;
-            rate = rateDeauth;
-            snprintf(tb, sizeof(tb), LV_SYMBOL_WARNING " DEAUTH ch%d " LV_SYMBOL_LEFT LV_SYMBOL_RIGHT,
-                     sniff::channel);
-        }
-        lv_label_set_text(lblTitle, tb);
-
-        if (rate > 5) {
-            lv_label_set_text(lblStatus, "ATTACK");
-            lv_obj_set_style_text_color(lblStatus, lv_color_hex(0xFF4444), 0);
-        } else if (rate > 0) {
-            lv_label_set_text(lblStatus, "!");
-            lv_obj_set_style_text_color(lblStatus, lv_color_hex(0xFFAA00), 0);
-        } else {
-            lv_label_set_text(lblStatus, "OK");
-            lv_obj_set_style_text_color(lblStatus, lv_color_hex(0x00FF88), 0);
-        }
-
-        char buf[120];
-        snprintf(buf, sizeof(buf),
-                 "deauth/s: %lu\ntotal deauth: %lu\ndisassoc: %lu",
-                 (unsigned long)rate,
-                 (unsigned long)sniff::cntDeauth,
-                 (unsigned long)sniff::cntDisassoc);
-        lv_label_set_text(lblStats, buf);
-    }
-
-    void onEnter() {
-        snifferStart(false, state::wifiChannel);   // фикс. канал, без прыжков
-        baseDeauth = rateDeauth = 0;
-        baseAp = rateAp = 0;
-        lastT = millis();
-    }
-    void onExit()  { snifferStop(); }
-}
-
-namespace scrPktRate {
-    lv_obj_t *root;
-    static lv_obj_t *lblTitle, *lblRate, *lblBreak;
-    static uint32_t baseTotal = 0, baseMgmt = 0, baseData = 0, baseCtrl = 0;
-    static uint32_t rTotal = 0, rMgmt = 0, rData = 0, rCtrl = 0;
-    static uint32_t baseFrom = 0, baseTo = 0, rFrom = 0, rTo = 0;
-    static uint32_t lastT = 0;
-
-    void build(lv_obj_t *parent) {
-        root = parent;
-        lv_obj_set_style_bg_color(root, lv_color_black(), 0);
-
-        lblTitle = makeLabel(root, UI_FONT, 0x444444,
-                             LV_ALIGN_TOP_MID, 0, cfg::CONTENT_TOP);
-        lv_label_set_text(lblTitle, LV_SYMBOL_WIFI " PKT RATE");
-
-        lblRate = makeLabel(root, BIG_FONT, 0x00CCFF,
-                            LV_ALIGN_CENTER, 0, -10);
-        lv_label_set_text(lblRate, "0");
-
-        lblBreak = makeLabel(root, UI_FONT, 0xAAAAAA,
-                             LV_ALIGN_BOTTOM_MID, 0, -16);
-        lv_obj_set_width(lblBreak, LV_HOR_RES - 8);
-        lv_label_set_long_mode(lblBreak, LV_LABEL_LONG_WRAP);
-        lv_label_set_text(lblBreak, "");
-    }
-
-    void update() {
-        uint32_t now = millis();
-        if (now - lastT < 1000) return;   // весь экран обновляем раз в секунду
-        lastT = now;
-
-        // Смена режима цель/канал — обнуляем базы, пропускаем тик (без выброса)
-        static bool wasTgt = false;
-        if (state::apSelected != wasTgt) {
-            wasTgt = state::apSelected;
-            baseTotal = sniff::cntTotal; baseMgmt = sniff::cntMgmt;
-            baseData  = sniff::cntData;  baseCtrl = sniff::cntCtrl;
-            baseFrom  = sniff::apFrom;   baseTo   = sniff::apTo;
-            return;
-        }
-
-        char tb[48], rb[16], bb[100];
-        if (state::apSelected) {
-            rFrom = sniff::apFrom - baseFrom; baseFrom = sniff::apFrom;
-            rTo   = sniff::apTo   - baseTo;   baseTo   = sniff::apTo;
-            snprintf(tb, sizeof(tb), LV_SYMBOL_WIFI " %.12s", state::apSsid);
-            snprintf(rb, sizeof(rb), "%lu", (unsigned long)(rFrom + rTo));
-            snprintf(bb, sizeof(bb), "pkt/s AP c%d\nfrom:%lu to:%lu",
-                     state::wifiChannel, (unsigned long)rFrom, (unsigned long)rTo);
-        } else {
-            rTotal = sniff::cntTotal - baseTotal; baseTotal = sniff::cntTotal;
-            rMgmt  = sniff::cntMgmt  - baseMgmt;  baseMgmt  = sniff::cntMgmt;
-            rData  = sniff::cntData  - baseData;  baseData  = sniff::cntData;
-            rCtrl  = sniff::cntCtrl  - baseCtrl;  baseCtrl  = sniff::cntCtrl;
-            snprintf(tb, sizeof(tb), LV_SYMBOL_WIFI " PKT ch%d " LV_SYMBOL_LEFT LV_SYMBOL_RIGHT,
-                     sniff::channel);
-            snprintf(rb, sizeof(rb), "%lu", (unsigned long)rTotal);
-            snprintf(bb, sizeof(bb), "pkt/s total\nmgmt:%lu data:%lu ctrl:%lu",
-                     (unsigned long)rMgmt, (unsigned long)rData, (unsigned long)rCtrl);
-        }
-        lv_label_set_text(lblTitle, tb);
-        lv_label_set_text(lblRate, rb);
-        lv_label_set_text(lblBreak, bb);
-    }
-
-    void onEnter() {
-        snifferStart(false, state::wifiChannel);   // фикс. канал, без прыжков
-        baseTotal = baseMgmt = baseData = baseCtrl = 0;
-        baseFrom = baseTo = 0;
-        lastT = millis();
-    }
-    void onExit()  { snifferStop(); }
-}
-
-namespace scrFinder {
-    static const int ROWS = 5;
-    lv_obj_t *root;
-    static lv_obj_t *lblTitle;
-    static lv_obj_t *rName[ROWS], *rRssi[ROWS], *rBar[ROWS];
-
-    void build(lv_obj_t *parent) {
-        root = parent;
-        lv_obj_set_style_bg_color(root, lv_color_black(), 0);
-
-        lblTitle = makeLabel(root, UI_FONT, 0x444444,
-                             LV_ALIGN_TOP_MID, 0, cfg::CONTENT_TOP);
-        lv_label_set_text(lblTitle, LV_SYMBOL_GPS " FINDER");
-
-        // Строка на устройство: имя | полоса сигнала | RSSI — всё в одну линию
-        const int top = cfg::CONTENT_TOP + 24;
-        const int rh  = 30;
-        for (int i = 0; i < ROWS; i++) {
-            int y = top + i * rh;
-            rName[i] = makeLabel(root, UI_FONT, 0xCCCCCC, LV_ALIGN_TOP_LEFT, 4, y);
-            rRssi[i] = makeLabel(root, UI_FONT, 0x00FF88, LV_ALIGN_TOP_RIGHT, -4, y);
-
-            lv_obj_t *bar = lv_bar_create(root);
-            lv_obj_set_size(bar, LV_HOR_RES - 8, 8);
-            lv_obj_align(bar, LV_ALIGN_TOP_LEFT, 4, y + 18);
-            lv_bar_set_range(bar, -100, -30);
-            lv_obj_set_style_bg_color(bar, lv_color_hex(0x222222), LV_PART_MAIN);
-            lv_obj_set_style_bg_color(bar, lv_color_hex(0x00FF88), LV_PART_INDICATOR);
-            lv_obj_set_style_radius(bar, 2, LV_PART_MAIN);
-            lv_obj_set_style_radius(bar, 2, LV_PART_INDICATOR);
-            rBar[i] = bar;
-        }
-    }
-
-    static void showRow(int i, bool on) {
-        if (on) { lv_obj_clear_flag(rName[i], LV_OBJ_FLAG_HIDDEN);
-                  lv_obj_clear_flag(rRssi[i], LV_OBJ_FLAG_HIDDEN);
-                  lv_obj_clear_flag(rBar[i],  LV_OBJ_FLAG_HIDDEN); }
-        else    { lv_obj_add_flag(rName[i], LV_OBJ_FLAG_HIDDEN);
-                  lv_obj_add_flag(rRssi[i], LV_OBJ_FLAG_HIDDEN);
-                  lv_obj_add_flag(rBar[i],  LV_OBJ_FLAG_HIDDEN); }
-    }
-
-    void update() {
-        static uint32_t last = 0;
-        if (millis() - last < 300) return;
-        last = millis();
-
-        char tb[40];
-        snprintf(tb, sizeof(tb), LV_SYMBOL_GPS " FINDER ch%d " LV_SYMBOL_LEFT LV_SYMBOL_RIGHT,
-                 sniff::channel);
-        lv_label_set_text(lblTitle, tb);
-
-        // топ-5 устройств на текущем канале по RSSI
-        struct { int8_t rssi; uint8_t mac[6]; } top[ROWS];
-        int tn = 0;
-        uint32_t now = millis();
-        portENTER_CRITICAL(&sniff::mux);
-        for (int i = 0; i < sniff::count; i++) {
-            if (sniff::table[i].ch != sniff::channel) continue;
-            if (now - sniff::table[i].lastSeen > 10000) continue;
-            int8_t r = sniff::table[i].rssi;
-            int pos = tn;
-            for (int p = 0; p < tn; p++) if (r > top[p].rssi) { pos = p; break; }
-            if (tn < ROWS) tn++;
-            for (int q = (tn < ROWS ? tn - 1 : ROWS - 1); q > pos; q--) top[q] = top[q-1];
-            if (pos < ROWS) { top[pos].rssi = r; memcpy(top[pos].mac, sniff::table[i].mac, 6); }
-        }
-        portEXIT_CRITICAL(&sniff::mux);
-
-        for (int i = 0; i < ROWS; i++) {
-            if (i < tn) {
-                lv_label_set_text(rName[i], ouiVendor(top[i].mac));
-                char rb[8]; snprintf(rb, sizeof(rb), "%d", top[i].rssi);
-                lv_label_set_text(rRssi[i], rb);
-                lv_bar_set_value(rBar[i], constrain((int)top[i].rssi, -100, -30), LV_ANIM_OFF);
-                showRow(i, true);
-            } else {
-                showRow(i, false);
-            }
-        }
-        if (tn == 0) {
-            showRow(0, true);
-            lv_obj_add_flag(rBar[0],  LV_OBJ_FLAG_HIDDEN);
-            lv_obj_add_flag(rRssi[0], LV_OBJ_FLAG_HIDDEN);
-            lv_label_set_text(rName[0], "no devices");
-        }
-    }
-
-    void onEnter() { snifferStart(false, state::wifiChannel); }
-    void onExit()  { snifferStop(); }
-}
 
 namespace recon {
     enum Kind : uint8_t { K_UNKNOWN = 0, K_STA = 1, K_AP = 2 };
@@ -346,6 +34,9 @@ namespace recon {
     static volatile bool hopping = true;
     static volatile int  channel = 1;
     static uint32_t hopLast = 0;
+
+    // Учёт атак: deauth/disassoc-фреймы за сессию (из собственного колбэка)
+    static volatile uint32_t cntDeauth = 0, cntDisassoc = 0;
 
     static const char *encStr(uint8_t e) {
         switch (e) { case E_OPEN: return "open"; case E_WEP: return "WEP";
@@ -483,6 +174,11 @@ namespace recon {
             touch(a2, K_STA, rssi, ch, nullptr, nullptr, 0, true);
             if (ssid[0]) probeLog(a2, ssid, rssi);         // направленный probe = сеть из PNL
             portEXIT_CRITICAL(&mux);
+        } else if (ftype == 0 && (fsub == 12 || fsub == 10)) {   // deauth / disassoc
+            if (fsub == 12) cntDeauth++; else cntDisassoc++;
+            portENTER_CRITICAL(&mux);
+            touch(a2, K_UNKNOWN, rssi, ch, nullptr, nullptr, 0, false);
+            portEXIT_CRITICAL(&mux);
         } else if (ftype == 2) {                          // data: STA<->AP (AP выводим из трафика)
             uint8_t ds = fr[1] & 3;
             portENTER_CRITICAL(&mux);
@@ -501,6 +197,7 @@ namespace recon {
     static void start(int fixedCh) {
         if (started) return;
         portENTER_CRITICAL(&mux); count = 0; probeN = 0; portEXIT_CRITICAL(&mux);
+        cntDeauth = cntDisassoc = 0;
         hopping = (fixedCh == 0);
         channel = fixedCh ? fixedCh : 1;
         hopLast = millis();
@@ -710,11 +407,27 @@ namespace scrRecon {
         else snprintf(out, n, "%02X%02X%02X", a.mac[3], a.mac[4], a.mac[5]);
     }
 
+    // Компактный индикатор RSSI: 4 ячейки '•' (есть сигнал) / '·' (нет).
+    // -90dBm и слабее -> пусто, -34dBm и сильнее -> полный (символы из шрифта).
+    static void rssiBar(int8_t rssi, char *out, int outsz) {
+        const int cells = 4;
+        int f = (rssi + 90) / 14;
+        if (f < 0) f = 0; if (f > cells) f = cells;
+        int o = 0;
+        for (int i = 0; i < cells && o < outsz - 3; i++)
+            o += snprintf(out + o, outsz - o, "%s", i < f ? "\xE2\x80\xA2" : "\xC2\xB7");
+        out[o] = 0;
+    }
+
     static void renderHeader(uint32_t now) {
-        char t[44], h[120];
+        char t[64], h[120];
         if (view == V_APS) {
-            snprintf(t, sizeof(t), LV_SYMBOL_WIFI " RECON ch%d (%d) " LV_SYMBOL_RIGHT "dev",
-                     recon::channel, visN);
+            // Счётчик атак deauth/disassoc прямо в титуле (предупреждение, если есть)
+            char dw[24] = "";
+            uint32_t dt = recon::cntDeauth + recon::cntDisassoc;
+            if (dt) snprintf(dw, sizeof(dw), " " LV_SYMBOL_WARNING "%lu", (unsigned long)dt);
+            snprintf(t, sizeof(t), LV_SYMBOL_WIFI " RECON ch%d (%d)%s " LV_SYMBOL_RIGHT "dev",
+                     recon::channel, visN, dw);
             lv_label_set_text(lblTitle, t);
             lv_label_set_text(lblHdr, "");
         } else if (view == V_DEVS) {
@@ -831,22 +544,23 @@ namespace scrRecon {
         uint32_t age = (now - d.lastSeen) / 1000;
         if (age > 999) age = 999;
 
-        char buf[96];
+        char buf[120];
         buf[0] = '\0';                                    // [FIX 4]
+        char bar[16]; rssiBar(d.rssi, bar, sizeof(bar));  // мини-индикатор сигнала (finder)
 
         if (view == V_APS) {
             char nm[18]; apName(d, nm, sizeof(nm));
-            snprintf(buf, sizeof(buf), "%-.18s\n%4d ch%-2d %-4s u%2" PRIu32 " %3" PRIu32 "s",
-                     nm, d.rssi, d.ch, encOf(d),
+            snprintf(buf, sizeof(buf), "%-.18s\n%s %4d ch%-2d %-4s u%2" PRIu32 " %3" PRIu32 "s",
+                     nm, bar, d.rssi, d.ch, encOf(d),
                      clientsOf(d.mac, now), age);         // [FIX 3] PRIu32 вместо %lu
         } else if (view == V_DEVS) {
             char dl[18]; devLabel(d.mac, dl, sizeof(dl));
-            snprintf(buf, sizeof(buf), "%-.18s\n%4d %6" PRIu32 "p %2dnet %3" PRIu32 "s",
-                     dl, d.rssi, d.packets, pnlCount(d.mac), age);
+            snprintf(buf, sizeof(buf), "%-.18s\n%s %4d %6" PRIu32 "p %2dnet %3" PRIu32 "s",
+                     dl, bar, d.rssi, d.packets, pnlCount(d.mac), age);
         } else {   // V_AP — клиенты точки
             char dl[18]; devLabel(d.mac, dl, sizeof(dl));
-            snprintf(buf, sizeof(buf), "%-.18s\n%4d %6" PRIu32 "p %3" PRIu32 "s",
-                     dl, d.rssi, d.packets, age);
+            snprintf(buf, sizeof(buf), "%-.18s\n%s %4d %6" PRIu32 "p %3" PRIu32 "s",
+                     dl, bar, d.rssi, d.packets, age);
         }
 
         buf[sizeof(buf) - 1] = '\0';                     // [FIX 4]

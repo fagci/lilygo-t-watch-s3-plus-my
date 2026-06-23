@@ -22,6 +22,16 @@ namespace sniff {
     inline volatile int  count = 0;
     inline portMUX_TYPE  mux = portMUX_INITIALIZER_UNLOCKED;
 
+    // Клиенты выбранной точки (отдельный учёт от общей таблицы MAC)
+    struct Client {
+        uint8_t  mac[6];
+        int8_t   rssi;
+        uint32_t lastSeen;
+    };
+    inline constexpr int CLIENTS_MAX = 64;
+    inline Client        clients[CLIENTS_MAX];
+    inline volatile int  clientCount = 0;
+
     inline bool     hopping  = false;
     inline bool     started  = false;   // guard от двойного esp_wifi_start
     inline int      channel  = 1;

@@ -33,7 +33,6 @@
 #define ARDUINO_LILYGO_LORA_SX1262
 #endif
 
-#include "jetbrains_14.c"
 #include "core.h"
 #include "core_state.h"
 #include "scr_system.h"   // группа System (Battery)

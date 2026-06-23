@@ -187,11 +187,17 @@ namespace recon {
         const uint8_t *a1 = fr + 4, *a2 = fr + 10, *a3 = fr + 16;
 
         if (ftype == 0 && (fsub == 8 || fsub == 5)) {     // beacon / probe-resp -> AP (подтверждена)
+            // Фикс. поля тела: timestamp(8) + beacon interval(2) + capability(2).
+            // Без них кадр битый — не плодим фантомные точки.
+            if (len < 36) return;
+            uint16_t bint = fr[32] | (fr[33] << 8);       // beacon interval, TU
+            if (bint < 1 || bint > 10000) return;         // неправдоподобно -> мусор
             char ssid[20]; uint8_t enc = E_OPEN;
             parseBeacon(fr + 24, len - 24, ssid, &enc);
-            // TSF — первые 8 байт тела маяка (uint64 LE, мкс от старта точки)
+            // TSF — первые 8 байт тела (uint64 LE, мкс). Кламп абсурда (>10 лет = мусор)
             uint64_t tsf = 0;
-            if (len >= 32) for (int b = 0; b < 8; b++) tsf |= (uint64_t)fr[24 + b] << (8 * b);
+            for (int b = 0; b < 8; b++) tsf |= (uint64_t)fr[24 + b] << (8 * b);
+            if (tsf > 315360000000000ULL) tsf = 0;
             portENTER_CRITICAL(&mux);
             touch(a2, K_AP, rssi, ch, a3, ssid, enc, true, true, tsf);
             portEXIT_CRITICAL(&mux);
@@ -241,6 +247,8 @@ namespace recon {
         // в AP-режиме радио занято собственным маяком, приём кадров рваный.
         esp_wifi_set_mode(WIFI_MODE_STA);
         esp_wifi_start();
+        esp_wifi_set_ps(WIFI_PS_NONE);   // КЛЮЧЕВОЕ: без сна модема, иначе приёмник
+                                         // дремлет и пропускает большинство кадров
         esp_wifi_set_promiscuous(true);
         esp_wifi_set_promiscuous_rx_cb(cb);
         wifi_promiscuous_filter_t f = { .filter_mask = WIFI_PROMIS_FILTER_MASK_ALL };
@@ -269,7 +277,7 @@ namespace recon {
 }
 
 namespace scrRecon {
-    enum View { V_APS, V_DEVS, V_AP, V_STA, V_LINKS };   // точки / устройства / клиенты AP / досье / связи
+    enum View { V_APS, V_DEVS, V_AP, V_STA, V_LINKS, V_GRAPH };   // +эго-граф фокусной точки
     lv_obj_t *root;
     static lv_obj_t *lblTitle, *lblHdr, *lblList;
     static int     view = V_APS;
@@ -317,6 +325,13 @@ namespace scrRecon {
     static bool     sampInit = false;
     static uint32_t sampMs = 0;
     static lv_obj_t *sbTrack = nullptr, *sbThumb = nullptr;   // скроллбар
+
+    // Эго-граф (V_GRAPH): центр = фокусная точка, спутники = её клиенты, рёбра = трафик
+    static const int GMAX = 8;
+    static lv_obj_t *gCenter = nullptr, *gCenterLbl = nullptr;
+    static lv_obj_t *gLine[GMAX] = {nullptr}, *gDot[GMAX] = {nullptr}, *gLbl[GMAX] = {nullptr};
+    static lv_point_precise_t gPts[GMAX][2];
+    static bool      gBuilt = false;
 
     static bool withGraph() { return view == V_AP || view == V_STA; }
     static int listTop()  { return withGraph() ? LIST_AP_Y : LIST_APS_Y; }
@@ -377,6 +392,47 @@ namespace scrRecon {
         lv_obj_set_style_bg_opa(sbThumb, LV_OPA_COVER, 0);
         lv_obj_add_flag(sbTrack, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(sbThumb, LV_OBJ_FLAG_HIDDEN);
+
+        // Эго-граф: рёбра (под узлами), затем спутники, затем центр (поверх). Скрыты.
+        for (int i = 0; i < GMAX; i++) {
+            lv_obj_t *ln = lv_line_create(root);
+            lv_obj_set_style_line_rounded(ln, true, 0);
+            lv_obj_add_flag(ln, LV_OBJ_FLAG_HIDDEN);
+            gLine[i] = ln;
+        }
+        for (int i = 0; i < GMAX; i++) {
+            lv_obj_t *d = lv_obj_create(root);
+            lv_obj_remove_style_all(d);
+            lv_obj_set_size(d, 10, 10);
+            lv_obj_set_style_radius(d, LV_RADIUS_CIRCLE, 0);
+            lv_obj_set_style_bg_color(d, lv_color_hex(0x00CCFF), 0);
+            lv_obj_set_style_bg_opa(d, LV_OPA_COVER, 0);
+            lv_obj_add_flag(d, LV_OBJ_FLAG_HIDDEN);
+            gDot[i] = d;
+            gLbl[i] = makeLabel(root, UI_FONT, 0xAAAAAA, LV_ALIGN_TOP_LEFT, 0, 0);
+            lv_obj_add_flag(gLbl[i], LV_OBJ_FLAG_HIDDEN);
+        }
+        gCenter = lv_obj_create(root);
+        lv_obj_remove_style_all(gCenter);
+        lv_obj_set_size(gCenter, 16, 16);
+        lv_obj_set_style_radius(gCenter, LV_RADIUS_CIRCLE, 0);
+        lv_obj_set_style_bg_color(gCenter, lv_color_hex(0x00FF88), 0);
+        lv_obj_set_style_bg_opa(gCenter, LV_OPA_COVER, 0);
+        lv_obj_add_flag(gCenter, LV_OBJ_FLAG_HIDDEN);
+        gCenterLbl = makeLabel(root, UI_FONT, 0x00FF88, LV_ALIGN_TOP_LEFT, 0, 0);
+        lv_obj_add_flag(gCenterLbl, LV_OBJ_FLAG_HIDDEN);
+        gBuilt = true;
+    }
+
+    static void graphHide() {
+        if (!gBuilt) return;
+        lv_obj_add_flag(gCenter, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(gCenterLbl, LV_OBJ_FLAG_HIDDEN);
+        for (int i = 0; i < GMAX; i++) {
+            lv_obj_add_flag(gLine[i], LV_OBJ_FLAG_HIDDEN);
+            lv_obj_add_flag(gDot[i],  LV_OBJ_FLAG_HIDDEN);
+            lv_obj_add_flag(gLbl[i],  LV_OBJ_FLAG_HIDDEN);
+        }
     }
 
     static void updateScrollbar() {
@@ -499,7 +555,7 @@ namespace scrRecon {
             lv_label_set_text(lblTitle, t);
             lv_label_set_text(lblHdr, "");
         } else if (view == V_LINKS) {
-            snprintf(t, sizeof(t), LV_SYMBOL_SHUFFLE " " LV_SYMBOL_REFRESH "LINKS (%d) " LV_SYMBOL_RIGHT "ap", visN);
+            snprintf(t, sizeof(t), LV_SYMBOL_SHUFFLE " " LV_SYMBOL_REFRESH "LINKS (%d) " LV_SYMBOL_RIGHT "graph", visN);
             lv_label_set_text(lblTitle, t);
             lv_label_set_text(lblHdr, "");
         } else if (view == V_AP) {
@@ -554,6 +610,86 @@ namespace scrRecon {
         lv_chart_set_next_value(chart, ser, rate);
     }
 
+    // Эго-граф фокусной точки: центр = AP, спутники = клиенты, рёбра = трафик.
+    static void renderGraph(uint32_t now) {
+        // фокус: выбранная цель, иначе самая «клиентная» точка из снимка
+        uint8_t focal[6]; bool have = false;
+        if (state::apSelected) { memcpy(focal, state::apBssid, 6); have = true; }
+        else {
+            int best = -1, bestC = -1;
+            for (int i = 0; i < snapN; i++) {
+                if (snap[i].kind != recon::K_AP) continue;
+                int c = clientsOf(snap[i].mac, now);
+                if (c > bestC) { bestC = c; best = i; }
+            }
+            if (best >= 0) { memcpy(focal, snap[best].mac, 6); have = true; }
+        }
+
+        if (!have) {
+            lv_label_set_text(lblTitle, LV_SYMBOL_SHUFFLE " GRAPH " LV_SYMBOL_RIGHT "ap");
+            lv_label_set_text(lblHdr, "");
+            lv_label_set_text(gCenterLbl, "no AP");
+            lv_obj_clear_flag(gCenterLbl, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_add_flag(gCenter, LV_OBJ_FLAG_HIDDEN);
+            for (int i = 0; i < GMAX; i++) { lv_obj_add_flag(gLine[i], LV_OBJ_FLAG_HIDDEN);
+                lv_obj_add_flag(gDot[i], LV_OBJ_FLAG_HIDDEN); lv_obj_add_flag(gLbl[i], LV_OBJ_FLAG_HIDDEN); }
+            return;
+        }
+
+        char nm[18]; int fi = findMac(focal);
+        if (fi >= 0) apName(snap[fi], nm, sizeof(nm));
+        else snprintf(nm, sizeof(nm), "%02X%02X%02X", focal[3], focal[4], focal[5]);
+
+        // топ-GMAX клиентов фокуса из рёбер по трафику
+        struct Sat { uint8_t mac[6]; uint32_t pkt; };
+        Sat sat[GMAX]; int sn = 0;
+        for (int i = 0; i < edgeSnapN; i++) {
+            if (memcmp(edgeSnap[i].ap, focal, 6) != 0) continue;
+            if (now - edgeSnap[i].lastSeen > KEEP) continue;
+            uint32_t pk = edgeSnap[i].packets; int pos = sn;
+            for (int p = 0; p < sn; p++) if (pk > sat[p].pkt) { pos = p; break; }
+            if (sn < GMAX) sn++;
+            for (int q = (sn < GMAX ? sn - 1 : GMAX - 1); q > pos; q--) sat[q] = sat[q-1];
+            if (pos < GMAX) { memcpy(sat[pos].mac, edgeSnap[i].sta, 6); sat[pos].pkt = pk; }
+        }
+
+        char t[48];
+        snprintf(t, sizeof(t), LV_SYMBOL_SHUFFLE " %.12s (%d) " LV_SYMBOL_RIGHT "ap", nm, sn);
+        lv_label_set_text(lblTitle, t);
+        lv_label_set_text(lblHdr, "");
+
+        const int CX = LV_HOR_RES / 2, CY = 132, R = 70;
+        lv_obj_set_pos(gCenter, CX - 8, CY - 8);
+        lv_obj_clear_flag(gCenter, LV_OBJ_FLAG_HIDDEN);
+        char cn[10]; snprintf(cn, sizeof(cn), "%.9s", nm);
+        lv_label_set_text(gCenterLbl, cn);
+        lv_obj_set_pos(gCenterLbl, CX - 28, CY + 10);
+        lv_obj_clear_flag(gCenterLbl, LV_OBJ_FLAG_HIDDEN);
+
+        uint32_t mx = 1; for (int i = 0; i < sn; i++) if (sat[i].pkt > mx) mx = sat[i].pkt;
+
+        for (int i = 0; i < GMAX; i++) {
+            if (i >= sn) { lv_obj_add_flag(gLine[i], LV_OBJ_FLAG_HIDDEN);
+                lv_obj_add_flag(gDot[i], LV_OBJ_FLAG_HIDDEN); lv_obj_add_flag(gLbl[i], LV_OBJ_FLAG_HIDDEN); continue; }
+            float a = -1.5708f + 6.2832f * i / sn;          // старт сверху, по кругу
+            int x = CX + (int)(R * cosf(a)), y = CY + (int)(R * sinf(a));
+            gPts[i][0].x = CX; gPts[i][0].y = CY; gPts[i][1].x = x; gPts[i][1].y = y;
+            lv_line_set_points(gLine[i], gPts[i], 2);
+            uint32_t col = (sat[i].pkt * 3 >= mx * 2) ? 0x00FF88
+                         : (sat[i].pkt * 3 >= mx)     ? 0x00CCFF : 0x44668A;
+            lv_obj_set_style_line_width(gLine[i], 1 + (int)(3.0f * sat[i].pkt / mx), 0);
+            lv_obj_set_style_line_color(gLine[i], lv_color_hex(col), 0);
+            lv_obj_clear_flag(gLine[i], LV_OBJ_FLAG_HIDDEN);
+            lv_obj_set_pos(gDot[i], x - 5, y - 5);
+            lv_obj_set_style_bg_color(gDot[i], lv_color_hex(col), 0);
+            lv_obj_clear_flag(gDot[i], LV_OBJ_FLAG_HIDDEN);
+            char dl[12]; devLabel(sat[i].mac, dl, sizeof(dl));
+            lv_label_set_text(gLbl[i], dl);
+            lv_obj_set_pos(gLbl[i], x - 12, y + 6);
+            lv_obj_clear_flag(gLbl[i], LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+
     void update() {
     static uint32_t last = 0;
     uint32_t now = millis();                              // [FIX 1] один вызов millis()
@@ -562,6 +698,17 @@ namespace scrRecon {
     last = now;                                           // [FIX 1] last = now, не millis() снова
 
     rebuild();
+
+    if (view == V_GRAPH) {                                 // эго-граф: прячем список/график/скроллбар
+        lv_obj_add_flag(chart, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(lblList, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(sbTrack, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(sbThumb, LV_OBJ_FLAG_HIDDEN);
+        renderGraph(now);
+        return;
+    }
+    graphHide();                                           // вне графа — прячем его виджеты
+    lv_obj_clear_flag(lblList, LV_OBJ_FLAG_HIDDEN);
     renderHeader(now);
 
     if (withGraph()) { lv_obj_clear_flag(chart, LV_OBJ_FLAG_HIDDEN); sampleActivity(now); }
@@ -680,11 +827,12 @@ namespace scrRecon {
         if (y < TITLE_BOT) {                           // тап по титулу = цикл верхних планов
             if      (view == V_APS)   { view = V_DEVS;  scrollRow = 0; forceRedraw = true; update(); }
             else if (view == V_DEVS)  { view = V_LINKS; scrollRow = 0; forceRedraw = true; update(); }
-            else if (view == V_LINKS) { view = V_APS;   scrollRow = 0; forceRedraw = true; update(); }
+            else if (view == V_LINKS) { view = V_GRAPH; scrollRow = 0; forceRedraw = true; update(); }
+            else if (view == V_GRAPH) { view = V_APS;   scrollRow = 0; forceRedraw = true; update(); }
             else back();
             return;
         }
-        if (view == V_STA || view == V_LINKS) return;  // досье/связи — строки не кликабельны
+        if (view == V_STA || view == V_LINKS || view == V_GRAPH) return;  // нет кликабельных строк
         int lt = listTop();
         if (y < lt) return;                            // мета/график — не реагируем
         int r = (y - lt) / ROW_H + scrollRow;          // строка = два текстовых ряда
@@ -721,6 +869,7 @@ namespace scrRecon {
         if (view == V_AP)   { view = V_APS;  scrollRow = 0; recon::setLock(0); resetChart(); forceRedraw = true; update(); return true; }
         if (view == V_DEVS) { view = V_APS;  scrollRow = 0; forceRedraw = true; update(); return true; }
         if (view == V_LINKS){ view = V_APS;  scrollRow = 0; forceRedraw = true; update(); return true; }
+        if (view == V_GRAPH){ view = V_APS;  scrollRow = 0; forceRedraw = true; update(); return true; }
         return false;                                   // V_APS -> домой
     }
 

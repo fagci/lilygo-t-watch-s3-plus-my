@@ -187,11 +187,17 @@ namespace recon {
         const uint8_t *a1 = fr + 4, *a2 = fr + 10, *a3 = fr + 16;
 
         if (ftype == 0 && (fsub == 8 || fsub == 5)) {     // beacon / probe-resp -> AP (подтверждена)
+            // Фикс. поля тела: timestamp(8) + beacon interval(2) + capability(2).
+            // Без них кадр битый — не плодим фантомные точки.
+            if (len < 36) return;
+            uint16_t bint = fr[32] | (fr[33] << 8);       // beacon interval, TU
+            if (bint < 1 || bint > 10000) return;         // неправдоподобно -> мусор
             char ssid[20]; uint8_t enc = E_OPEN;
             parseBeacon(fr + 24, len - 24, ssid, &enc);
-            // TSF — первые 8 байт тела маяка (uint64 LE, мкс от старта точки)
+            // TSF — первые 8 байт тела (uint64 LE, мкс). Кламп абсурда (>10 лет = мусор)
             uint64_t tsf = 0;
-            if (len >= 32) for (int b = 0; b < 8; b++) tsf |= (uint64_t)fr[24 + b] << (8 * b);
+            for (int b = 0; b < 8; b++) tsf |= (uint64_t)fr[24 + b] << (8 * b);
+            if (tsf > 315360000000000ULL) tsf = 0;
             portENTER_CRITICAL(&mux);
             touch(a2, K_AP, rssi, ch, a3, ssid, enc, true, true, tsf);
             portEXIT_CRITICAL(&mux);
@@ -241,6 +247,8 @@ namespace recon {
         // в AP-режиме радио занято собственным маяком, приём кадров рваный.
         esp_wifi_set_mode(WIFI_MODE_STA);
         esp_wifi_start();
+        esp_wifi_set_ps(WIFI_PS_NONE);   // КЛЮЧЕВОЕ: без сна модема, иначе приёмник
+                                         // дремлет и пропускает большинство кадров
         esp_wifi_set_promiscuous(true);
         esp_wifi_set_promiscuous_rx_cb(cb);
         wifi_promiscuous_filter_t f = { .filter_mask = WIFI_PROMIS_FILTER_MASK_ALL };

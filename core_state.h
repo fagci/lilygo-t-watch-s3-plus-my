@@ -31,6 +31,7 @@ namespace notif {
     inline volatile bool connected = false;
     inline volatile bool pushNow = false;
     inline volatile bool arrived = false;
+    inline volatile bool bleSuspended = false;   // BLE заглушён (WiFi-сниф в Recon)
     inline portMUX_TYPE  mux = portMUX_INITIALIZER_UNLOCKED;
 
     inline NimBLECharacteristic *chBatt = nullptr;

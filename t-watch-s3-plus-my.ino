@@ -131,6 +131,8 @@ static lv_obj_t *chevL = nullptr, *chevR = nullptr;   // стрелки краё
 
 static int curGroup = 0, curPos = 0;
 static int16_t navPressX = 0, navPressY = 0;   // координаты касания для свайп/тап
+static int     liveRows = 0;                   // применённое смещение списка за текущий драг
+static bool    liveScrolled = false;           // был ли «живой» скролл (чтобы не дублировать на release)
 
 // App Drawer (mobile OS)
 static bool     drawerOpen  = false;
@@ -569,9 +571,28 @@ void setup()
         lv_indev_add_event_cb(indev, [](lv_event_t *) {
             lv_point_t p; lv_indev_get_point(lv_indev_get_act(), &p);
             navPressX = p.x; navPressY = p.y;
+            liveRows = 0; liveScrolled = false;
             state::lastActivity = millis();
             if (state::screenOff) wakeScreen();
         }, LV_EVENT_PRESSED, NULL);
+
+        // Удержание+движение: «живой» скролл списка за пальцем (плавнее, чем прыжок
+        // на отпускании). Нижняя кромка отдана drawer'у; горизонталь — tileview.
+        lv_indev_add_event_cb(indev, [](lv_event_t *) {
+            if (drawerOpen || state::screenOff) return;
+            if (state::curScreen != SCR_RECON && state::curScreen != SCR_NOTIF) return;
+            if (navPressY > LV_VER_RES - 40) return;          // зона drawer — не скроллим
+            lv_point_t p; lv_indev_get_point(lv_indev_get_act(), &p);
+            int dx = p.x - navPressX, dy = p.y - navPressY;
+            if (abs(dy) <= abs(dx) || abs(dy) < 12) return;   // не вертикаль / мелочь
+            int want = -dy / 18;                              // целевое смещение в строках
+            int delta = want - liveRows;
+            if (delta) {
+                if (state::curScreen == SCR_RECON) scrRecon::scroll(delta);
+                else                               scrNotif::scroll(delta);
+                liveRows = want; liveScrolled = true;
+            }
+        }, LV_EVENT_PRESSING, NULL);
 
         // Отпускание: мобильная OS схема навигации.
         // Горизонтальный свайп обрабатывает сам tileview (экраны в группе).
@@ -604,10 +625,12 @@ void setup()
             if (dy < -40 && vert && navPressY > LV_VER_RES - 40) {
                 openDrawer();                            // свайп вверх от нижнего края
             } else if (listScr && vert && abs(dy) > 25) {
-                int rows = -dy / 22;                     // тащим вверх -> вниз по списку
-                if (rows == 0) rows = (dy < 0) ? 1 : -1;
-                if (state::curScreen == SCR_RECON) scrRecon::scroll(rows);
-                else                               scrNotif::scroll(rows);
+                if (!liveScrolled) {                     // живой скролл уже всё применил
+                    int rows = -dy / 22;
+                    if (rows == 0) rows = (dy < 0) ? 1 : -1;
+                    if (state::curScreen == SCR_RECON) scrRecon::scroll(rows);
+                    else                               scrNotif::scroll(rows);
+                }
             } else if (dy > 40 && vert) {
                 if (state::curScreen == SCR_RECON && scrRecon::back()) { /* уровень вверх */ }
                 else gotoScreen(SCR_CLOCK);

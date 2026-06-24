@@ -15,5 +15,5 @@ namespace scrRecon {
     void onExit();
     void scroll(int d);
     bool back();
-    void tap(int y);
+    void tap(int x, int y);
 }

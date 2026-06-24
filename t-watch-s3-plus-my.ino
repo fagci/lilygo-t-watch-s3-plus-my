@@ -612,7 +612,7 @@ void setup()
                 if (state::curScreen == SCR_RECON && scrRecon::back()) { /* уровень вверх */ }
                 else gotoScreen(SCR_CLOCK);
             } else if (abs(dx) < 20 && abs(dy) < 20) {
-                if      (state::curScreen == SCR_RECON) scrRecon::tap(navPressY);
+                if      (state::curScreen == SCR_RECON) scrRecon::tap(navPressX, navPressY);
                 else if (state::curScreen == SCR_NOTIF) scrNotif::tap(navPressY);
                 else if (state::curScreen == SCR_CLOCK) { if (notif::count > 0) gotoScreen(SCR_NOTIF); }
             }

@@ -294,7 +294,7 @@ namespace recon {
 namespace scrRecon {
     enum View { V_APS, V_DEVS, V_AP, V_STA, V_LINKS, V_STATS };   // +сводка по кадрам
     lv_obj_t *root;
-    static lv_obj_t *lblTitle, *lblHdr, *lblList;
+    static lv_obj_t *lblTitle, *lblHdr, *lblList, *gBack;
     static int     view = V_APS;
     static int     staFrom = V_AP;        // откуда вошли в V_STA (для back)
     static uint8_t selBssid[6], selSta[6];
@@ -303,7 +303,8 @@ namespace scrRecon {
 
     static const int LINE_H      = 20;
     static const int ROW_H       = 40;                      // две строки на элемент
-    static const int TITLE_BOT   = cfg::CONTENT_TOP + 18;   // зона тапа = "назад"
+    static const int TITLE_BOT   = cfg::CONTENT_TOP + 20;   // высота строки заголовка
+    static const int BACK_W      = 46;                      // ширина кнопки "назад" слева
     static const int LIST_APS_Y  = cfg::CONTENT_TOP + 20;   // список под титулом
     static const int CHART_Y     = cfg::CONTENT_TOP + 38;
     static const int CHART_H     = 34;
@@ -334,7 +335,8 @@ namespace scrRecon {
 
     // график активности выбранного фильтра (пакетов/с)
     static lv_obj_t *chart = nullptr;
-    static lv_chart_series_t *ser = nullptr;
+    static lv_chart_series_t *ser = nullptr, *serD = nullptr;
+    static uint32_t lastSampDeauth = 0;
     static uint32_t lastSampPkts = 0;
     static int      chartMax = 10;
     static bool     sampInit = false;
@@ -364,9 +366,22 @@ namespace scrRecon {
     void build(lv_obj_t *parent) {
         root = parent;
         lv_obj_set_style_bg_color(root, lv_color_black(), 0);
-        lblTitle = makeLabel(root, UI_FONT, 0x00CCFF, LV_ALIGN_TOP_MID, 0, cfg::CONTENT_TOP);
+
+        // Крупная кнопка "назад" слева в строке заголовка (отдельная зона тапа)
+        gBack = lv_obj_create(root);
+        lv_obj_remove_style_all(gBack);
+        lv_obj_set_size(gBack, BACK_W - 6, 18);
+        lv_obj_set_pos(gBack, 2, cfg::CONTENT_TOP - 1);
+        lv_obj_set_style_bg_color(gBack, lv_color_hex(0x223344), 0);
+        lv_obj_set_style_bg_opa(gBack, LV_OPA_COVER, 0);
+        lv_obj_set_style_radius(gBack, 4, 0);
+        lv_obj_t *bl = makeLabel(gBack, UI_FONT, 0xFFFFFF, LV_ALIGN_CENTER, 0, 0);
+        lv_label_set_text(bl, LV_SYMBOL_LEFT);
+
+        // Заголовок правее кнопки назад (выровнен по левому краю от кнопки)
+        lblTitle = makeLabel(root, UI_FONT, 0x00CCFF, LV_ALIGN_TOP_LEFT, BACK_W, cfg::CONTENT_TOP);
         lv_label_set_text(lblTitle, LV_SYMBOL_WIFI " RECON");
-        lblHdr = makeLabel(root, UI_FONT, 0xFFAA00, LV_ALIGN_TOP_LEFT, 4, cfg::CONTENT_TOP + 18);
+        lblHdr = makeLabel(root, UI_FONT, 0xFFAA00, LV_ALIGN_TOP_LEFT, 4, cfg::CONTENT_TOP + 20);
         lv_obj_set_width(lblHdr, LV_HOR_RES - 8);
         lv_label_set_long_mode(lblHdr, LV_LABEL_LONG_WRAP);
         lv_label_set_text(lblHdr, "");
@@ -381,7 +396,10 @@ namespace scrRecon {
         lv_obj_set_style_bg_opa(chart, LV_OPA_TRANSP, 0);
         lv_obj_set_style_border_width(chart, 0, 0);
         lv_obj_set_style_pad_all(chart, 0, 0);
-        ser = lv_chart_add_series(chart, lv_color_hex(0x00FF88), LV_CHART_AXIS_PRIMARY_Y);
+        lv_obj_set_style_pad_column(chart, 0, 0);          // столбики впритык -> «заполненный» вид
+        lv_obj_set_style_radius(chart, 0, LV_PART_ITEMS);
+        ser  = lv_chart_add_series(chart, lv_color_hex(0x00FF88), LV_CHART_AXIS_PRIMARY_Y); // пакеты
+        serD = lv_chart_add_series(chart, lv_color_hex(0xFF4444), LV_CHART_AXIS_PRIMARY_Y); // deauth (красным)
         lv_obj_add_flag(chart, LV_OBJ_FLAG_HIDDEN);
 
         lblList = makeLabel(root, UI_FONT, 0xCCCCCC, LV_ALIGN_TOP_LEFT, 4, LIST_APS_Y);
@@ -419,9 +437,10 @@ namespace scrRecon {
     }
 
     static void resetChart() {
-        sampInit = false; chartMax = 10; sampMs = 0;
+        sampInit = false; chartMax = 10; sampMs = 0; lastSampDeauth = 0;
         if (chart) { lv_chart_set_range(chart, LV_CHART_AXIS_PRIMARY_Y, 0, chartMax);
-                     lv_chart_set_all_value(chart, ser, 0); }
+                     lv_chart_set_all_value(chart, ser, 0);
+                     lv_chart_set_all_value(chart, serD, 0); }
     }
 
     static int clientsOf(const uint8_t *bssid, uint32_t now) {
@@ -533,18 +552,21 @@ namespace scrRecon {
             int ai = findMac(selBssid);
             if (ai >= 0) {
                 recon::Dev &a = snap[ai];
-                char nm[18]; apName(a, nm, sizeof(nm));
-                snprintf(t, sizeof(t), LV_SYMBOL_LEFT " %s", nm);
+                char nm[20];
+                if (a.ssid[0]) apName(a, nm, sizeof(nm));   // имя есть
+                else snprintf(nm, sizeof(nm), "%02X:%02X:%02X:%02X:%02X:%02X",  // иначе полный MAC
+                              a.mac[0], a.mac[1], a.mac[2], a.mac[3], a.mac[4], a.mac[5]);
+                snprintf(t, sizeof(t), "%s", nm);
                 // [cN] = залочены на канал AP (не хопим); up = аптайм из TSF; ⚠ = откат TSF
                 char up[12]; fmtUptime(a.tsf, up, sizeof(up));
                 snprintf(h, sizeof(h), "%s%.8s [c%d] %s %ddBm u%d up%s",
                          a.tsfReset ? LV_SYMBOL_WARNING " " : "",
                          ouiVendor(a.mac), a.ch, encOf(a), a.rssi, clientsOf(selBssid, now), up);
-            } else { snprintf(t, sizeof(t), LV_SYMBOL_LEFT " AP lost"); h[0] = 0; }
+            } else { snprintf(t, sizeof(t), "AP lost"); h[0] = 0; }
             lv_label_set_text(lblTitle, t);
             lv_label_set_text(lblHdr, h);
         } else {   // V_STA — титул всегда из selSta (MAC не пропадёт при переписывании)
-            snprintf(t, sizeof(t), LV_SYMBOL_LEFT " %02X:%02X:%02X:%02X:%02X:%02X%s",
+            snprintf(t, sizeof(t), "%02X:%02X:%02X:%02X:%02X:%02X%s",
                      selSta[0],selSta[1],selSta[2],selSta[3],selSta[4],selSta[5],
                      (selSta[0] & 0x02) ? " rnd" : "");
             int si = findMac(selSta);
@@ -575,10 +597,15 @@ namespace scrRecon {
         sampMs = now;
         int32_t rate = sampInit ? (int32_t)(cur - lastSampPkts) : 0;
         if (rate < 0) rate = 0;
-        lastSampPkts = cur; sampInit = true;
+        // deauth/disassoc за тот же интервал (на залоченном канале точки = её атаки)
+        uint32_t dcur = recon::cntDeauth + recon::cntDisassoc;
+        int32_t drate = sampInit ? (int32_t)(dcur - lastSampDeauth) : 0;
+        if (drate < 0) drate = 0;
+        lastSampPkts = cur; lastSampDeauth = dcur; sampInit = true;
         if (rate > chartMax) { chartMax = rate;
             lv_chart_set_range(chart, LV_CHART_AXIS_PRIMARY_Y, 0, chartMax); }
         lv_chart_set_next_value(chart, ser, rate);
+        lv_chart_set_next_value(chart, serD, drate);      // красная серия — deauth
     }
 
     void update() {
@@ -732,9 +759,11 @@ namespace scrRecon {
     lv_label_set_text(lblList, list);
 }
 
-    // Тап: ТОЛЬКО титул -> переключение/назад; строка списка -> drill
-    void tap(int y) {
-        if (y < TITLE_BOT) {                           // тап по титулу = цикл верхних планов
+    // Тап: кнопка назад (слева) -> уровень вверх; остальной титул -> цикл планов;
+    // строка списка -> drill.
+    void tap(int x, int y) {
+        if (y < TITLE_BOT) {
+            if (x < BACK_W) { back(); return; }        // крупная кнопка "назад"
             if      (view == V_APS)   { view = V_DEVS;  scrollRow = 0; forceRedraw = true; update(); }
             else if (view == V_DEVS)  { view = V_LINKS; scrollRow = 0; forceRedraw = true; update(); }
             else if (view == V_LINKS) { view = V_STATS; scrollRow = 0; forceRedraw = true; update(); }

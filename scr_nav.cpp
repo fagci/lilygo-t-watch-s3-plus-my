@@ -56,7 +56,7 @@ namespace scrGps {
 
         // Список спутников ниже
         lblSats = makeLabel(root, UI_FONT, 0xAAAAAA,
-                            LV_ALIGN_TOP_LEFT, 4, cfg::CONTENT_TOP + 90);
+                            LV_ALIGN_TOP_LEFT, 4, cfg::CONTENT_TOP + 112);
         lv_obj_set_width(lblSats, LV_HOR_RES - 8);
         lv_label_set_long_mode(lblSats, LV_LABEL_LONG_WRAP);
         lv_label_set_text(lblSats, "");
@@ -76,11 +76,12 @@ namespace scrGps {
                 "lat: %.6f\n"
                 "lon: %.6f\n"
                 "alt: %.0fm  spd: %.1f\n"
-                "pDOP: %.1f  dist: %.0fm",
+                "pDOP: %.1f  acc: %.1fm\n"
+                "dist: %.0fm",
                 state::gpsFix, state::gpsVisible,
                 state::gpsLat, state::gpsLon,
                 state::gpsAlt, state::speedKmh,
-                state::gpsPdop, state::distanceM);
+                state::gpsPdop, state::gpsHacc, state::distanceM);
             lv_obj_set_style_text_color(lblFix, lv_color_hex(0x00FF88), 0);
         } else {
             uint32_t s = millis() / 1000;

@@ -84,11 +84,11 @@ namespace scrGps {
         if (!gnssOk) {
             snprintf(buf, sizeof(buf),
                 LV_SYMBOL_GPS " LINK DOWN\n"
-                "baud: %lu\n"
+                "baud:%lu  rx-pin:%d\n"
                 "raw: %u B / 200ms\n"
                 "ubx: %s   nmea: %s\n"
-                "configuring...",
-                (unsigned long)state::gpsBaud, state::gpsRawBytes,
+                "scanning pins/baud...",
+                (unsigned long)state::gpsBaud, state::gpsRxPin, state::gpsRawBytes,
                 state::gpsSawUbx ? "Y" : "N", state::gpsSawNmea ? "Y" : "N");
             lv_obj_set_style_text_color(lblFix, lv_color_hex(0xFF4444), 0);
             lv_label_set_text(lblFix, buf);

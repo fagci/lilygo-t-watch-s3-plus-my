@@ -277,7 +277,16 @@ void readGPS()
         state::gpsLat   = lat;
         state::gpsLon   = lon;
         state::gpsAlt   = gnss.getAltitudeMSL() / 1000.0f;     // мм -> м
-        state::speedKmh = gnss.getGroundSpeed() * 0.0036f;     // мм/с -> км/ч
+
+        // Скорость: стоя на месте модуль шумит и иногда выдаёт фантом (192 км/ч).
+        // Гасим в ноль, если фикс невалиден или скорость не превышает свою же
+        // оценку точности (sAcc) — это и есть «стою на месте».
+        int32_t  gs  = gnss.getGroundSpeed();                  // мм/с
+        uint32_t sa  = gnss.getSpeedAccEst();                  // оценка точности, мм/с
+        if (!gnss.getGnssFixOk() || gs < 0 || (uint32_t)gs <= sa)
+            state::speedKmh = 0;
+        else
+            state::speedKmh = gs * 0.0036f;                    // мм/с -> км/ч
 
         if (state::gpsHasPrev) {
             double d = haversineM(state::gpsPrevLat, state::gpsPrevLon, lat, lon);

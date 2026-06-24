@@ -72,10 +72,10 @@ struct Screen {
 
 static Screen screens[] = {
     { &scrClock::root,   scrClock::build,   scrClock::update,   nullptr,             nullptr,            "Clock",   LV_SYMBOL_LOOP,         "Time", RES_NONE },
-    { &scrSpeed::root,   scrSpeed::build,   scrSpeed::update,   nullptr,             nullptr,            "Speed",   LV_SYMBOL_GPS,          "Nav", RES_NONE },
+    { &scrSpeed::root,   scrSpeed::build,   scrSpeed::update,   scrSpeed::onEnter,    nullptr,            "Speed",   LV_SYMBOL_GPS,          "Nav", RES_NONE },
     { &scrAudio::root,   scrAudio::build,   scrAudio::update,   scrAudio::onEnter,   scrAudio::onExit,   "Audio",   LV_SYMBOL_AUDIO,        "Audio", RES_AUDIO },
     { &scrLpd::root,     scrLpd::build,     scrLpd::update,     scrLpd::onEnter,     scrLpd::onExit,     "LPD433",  LV_SYMBOL_WIFI,         "Radio", RES_RADIO },
-    { &scrGps::root,     scrGps::build,     scrGps::update,     nullptr,             nullptr,            "GPS",     LV_SYMBOL_GPS,          "Nav", RES_NONE },
+    { &scrGps::root,     scrGps::build,     scrGps::update,     scrGps::onEnter,     nullptr,            "GPS",     LV_SYMBOL_GPS,          "Nav", RES_NONE },
     { &scrRecon::root,   scrRecon::build,   scrRecon::update,   scrRecon::onEnter,   scrRecon::onExit,   "Recon",   LV_SYMBOL_WIFI,         "WiFi", RES_WIFI },
     { &scrBattery::root, scrBattery::build, scrBattery::update, nullptr,             nullptr,            "Battery", LV_SYMBOL_BATTERY_FULL, "System", RES_NONE },
     { &scrBle::root,     scrBle::build,     scrBle::update,     scrBle::onEnter,     scrBle::onExit,     "BLE",     LV_SYMBOL_BLUETOOTH,    "BLE", RES_BLE },
@@ -222,6 +222,10 @@ static void activateTile(int k)
     curGroup = tileGroup[k];
     curPos   = tilePos[k];
     appEnter(scr);
+    // Полная перерисовка нового тайла: снап-анимация tileview иногда оставляет
+    // на нём ошмётки соседнего экрана (большой спидометр «протекал» на GPS).
+    if (tiles[k]) lv_obj_invalidate(tiles[k]);
+    if (screens[scr].update) screens[scr].update();   // показать данные сразу, без ожидания троттла
     updateIndicators();
 }
 

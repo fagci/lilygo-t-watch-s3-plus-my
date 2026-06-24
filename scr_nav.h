@@ -7,10 +7,12 @@ namespace scrSpeed {
     extern lv_obj_t *root;
     void build(lv_obj_t *parent);
     void update();
+    void onEnter();
 }
 
 namespace scrGps {
     extern lv_obj_t *root;
     void build(lv_obj_t *parent);
     void update();
+    void onEnter();
 }

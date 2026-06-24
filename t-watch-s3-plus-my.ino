@@ -443,7 +443,12 @@ static void buildTileview()
     }
     tileTotal = k;
 
-    lv_obj_set_style_anim_duration(tileview, 90, 0);    // снап быстрый и плавный
+    // Снап без анимации. На маленьком частичном draw-буфере дисплея слайд-
+    // анимация не успевает дорисоваться за кадр и оставляет ошмётки соседнего
+    // экрана («протекал» спидометр); к тому же VALUE_CHANGED у tileview
+    // приходит в НАЧАЛЕ анимации, так что инвалидация осевшего тайла не спасала.
+    // Мгновенный снап => осевшее состояние == отрисованное.
+    lv_obj_set_style_anim_duration(tileview, 0, 0);
     lv_obj_add_event_cb(tileview, tileEventCb, LV_EVENT_VALUE_CHANGED, NULL);
 }
 

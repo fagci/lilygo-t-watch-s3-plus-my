@@ -4,6 +4,8 @@
 namespace scrSpeed {
     lv_obj_t *root;
     static lv_obj_t *lblSpeed, *lblFix;
+    static uint32_t lastUpd = 0;
+    void onEnter() { lastUpd = 0; }        // войдя на экран — обновиться сразу
     void build(lv_obj_t *parent) {
         root = parent;
         lv_obj_set_style_bg_color(root, lv_color_black(), 0);
@@ -19,9 +21,8 @@ namespace scrSpeed {
     }
 
     void update() {
-        static uint32_t last = 0;
-        if (millis() - last < 1000) return;   // спидометр посекундный
-        last = millis();
+        if (millis() - lastUpd < 1000) return;   // спидометр посекундный
+        lastUpd = millis();
 
         char buf[40];
         snprintf(buf, sizeof(buf), "%.1f", state::speedKmh);
@@ -44,6 +45,8 @@ namespace scrSpeed {
 namespace scrGps {
     lv_obj_t *root;
     static lv_obj_t *lblFix, *lblSats;
+    static uint32_t lastUpd = 0;
+    void onEnter() { lastUpd = 0; }        // войдя на экран — обновиться сразу
 
     // gnssId -> буква созвездия (G GPS, R ГЛОНАСС, E Galileo, B BeiDou,
     // Q QZSS, S SBAS).
@@ -74,9 +77,8 @@ namespace scrGps {
     }
 
     void update() {
-        static uint32_t last = 0;
-        if (millis() - last < 1000) return;   // диагностика посекундная
-        last = millis();
+        if (millis() - lastUpd < 1000) return;   // диагностика посекундная
+        lastUpd = millis();
 
         char buf[256];
 
@@ -130,11 +132,17 @@ namespace scrGps {
         char sbuf[512];
         int p = 0;
         uint8_t vCnt[8] = {0}, uCnt[8] = {0};
+        uint16_t cnoSum = 0; uint8_t cnoMax = 0, cnoUsedN = 0;
         for (uint8_t i = 0; i < state::gpsSatCount; i++) {
-            uint8_t g = state::gpsSats[i].gnss;
-            if (g < 8) { vCnt[g]++; if (state::gpsSats[i].used) uCnt[g]++; }
+            const GpsSat &sv = state::gpsSats[i];
+            if (sv.gnss < 8) { vCnt[sv.gnss]++; if (sv.used) uCnt[sv.gnss]++; }
+            if (sv.cno > cnoMax) cnoMax = sv.cno;
+            if (sv.used) { cnoSum += sv.cno; cnoUsedN++; }
         }
-        // сводная строка по созвездиям с непустым счётчиком
+        // строка качества сигнала: лучший и средний C/N0 по используемым спутникам
+        p += snprintf(sbuf + p, sizeof(sbuf) - p, "cno max:%u avg:%u dB\n",
+                      cnoMax, cnoUsedN ? cnoSum / cnoUsedN : 0);
+        // сводная строка по созвездиям с непустым счётчиком (used/view)
         for (uint8_t g = 0; g < 8 && p < (int)sizeof(sbuf) - 16; g++) {
             if (!vCnt[g]) continue;
             p += snprintf(sbuf + p, sizeof(sbuf) - p, "%c%u/%u ",

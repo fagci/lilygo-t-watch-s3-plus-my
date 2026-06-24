@@ -71,6 +71,16 @@ namespace cfg {
 }
 
 // ─── Глобальное состояние (определения в core.cpp) ───────────────────────────
+
+// Один спутник из UBX-NAV-SAT для экрана диагностики.
+struct GpsSat {
+    uint8_t gnss;   // gnssId: 0=GPS 1=SBAS 2=GAL 3=BDS 5=QZSS 6=GLO
+    uint8_t sv;     // svId
+    uint8_t cno;    // C/N0, дБ-Гц (это и есть «rssi» спутника)
+    uint8_t used;   // 1 — используется в решении (в фиксе)
+};
+constexpr uint8_t GPS_SAT_MAX = 48;
+
 namespace state {
     extern volatile int      curScreen;
     extern volatile bool     scrChanged;
@@ -81,11 +91,7 @@ namespace state {
     extern bool     gpsActive;
     extern bool     gpsSynced;
     extern float    speedKmh;
-    extern uint8_t  gpsVisible;
-    extern uint8_t  gpsMaxSnr;
-    extern uint32_t gpsChars;
-    extern uint32_t gpsFailCsum;
-    extern uint32_t gpsLastCharMs;
+    extern uint8_t  gpsVisible;       // SIV из PVT — спутников в решении (в фиксе)
 
     extern uint8_t  gpsFix;
     extern double   gpsLat, gpsLon;
@@ -95,6 +101,16 @@ namespace state {
     extern double   distanceM;
     extern double   gpsPrevLat, gpsPrevLon;
     extern bool     gpsHasPrev;
+
+    // Диагностика линка и спутников (экран GPS)
+    extern uint32_t gpsBaud;          // выбранный бод UART
+    extern uint16_t gpsRawBytes;      // сырьё с UART за окно пробы (~200мс)
+    extern bool     gpsSawUbx;        // в сырье замечен UBX (0xB5)
+    extern bool     gpsSawNmea;       // в сырье замечен NMEA ('$')
+    extern uint8_t  gpsProtVer;       // PROTVER из UBX-MON-VER (0 — неизвестно)
+    extern uint8_t  gpsSivView;       // спутников отслеживается (UBX-NAV-SAT numSvs)
+    extern GpsSat   gpsSats[GPS_SAT_MAX];
+    extern uint8_t  gpsSatCount;
 
     extern uint32_t stepCount;
     extern uint32_t pomStart;

@@ -51,8 +51,10 @@ namespace cfg {
 
     constexpr int      GPS_PIN_RX     = 42;
     constexpr int      GPS_PIN_TX     = 41;
-    constexpr uint32_t GPS_BAUD       = 38400;
+    constexpr uint32_t GPS_BAUD       = 38400;   // заводской бод MIA-M10Q
     constexpr uint32_t GPS_KEEP_MS    = 5UL * 60 * 1000;
+    constexpr uint16_t GPS_MEAS_MS    = 250;     // период измерений (4 Гц)
+    constexpr uint16_t GPS_NAV_RATIO  = 1;       // решений на измерение
 
     constexpr bool     WAKE_ON_TILT   = true;
     constexpr bool     WAKE_ON_FLIP   = true;
@@ -89,6 +91,7 @@ namespace state {
     extern double   gpsLat, gpsLon;
     extern float    gpsAlt;
     extern float    gpsPdop;
+    extern float    gpsHacc;          // горизонтальная точность, м
     extern double   distanceM;
     extern double   gpsPrevLat, gpsPrevLon;
     extern bool     gpsHasPrev;

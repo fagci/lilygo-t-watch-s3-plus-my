@@ -22,31 +22,13 @@ namespace state {
     volatile uint32_t lastActivity=0; bool screenDimmed=false, screenOff=false;
     bool gpsActive=false,gpsSynced=false; float speedKmh=0;
     uint8_t gpsVisible=0,gpsMaxSnr=0; uint32_t gpsChars=0,gpsFailCsum=0,gpsLastCharMs=0;
-    uint8_t gpsFix=0; double gpsLat=0,gpsLon=0; float gpsAlt=0,gpsPdop=99.9f;
+    uint8_t gpsFix=0; double gpsLat=0,gpsLon=0; float gpsAlt=0,gpsPdop=99.9f,gpsHacc=0;
     double distanceM=0,gpsPrevLat=0,gpsPrevLon=0; bool gpsHasPrev=false;
     uint32_t stepCount=0,pomStart=0,stepsAtStart=0;
     int16_t lpdRssi[cfg::LPD_CHANS]; bool lpdDirty=false;
     volatile int wifiChannel=1;   // активный WiFi-канал (общий источник истины)
     uint8_t apBssid[6]={0}; char apSsid[20]=""; volatile bool apSelected=false;
     uint8_t battHist[cfg::BATT_SAMPLES]; int battCount=0; uint32_t battLastSample=0;
-}
-
-static uint8_t accVisible = 0;
-static uint8_t accMaxSnr  = 0;
-
-static void parseGSV(const char *line)
-{
-    char buf[8];
-    int msgNum = 0;
-    if (nmeaField(line, 2, buf, sizeof(buf)) > 0) msgNum = atoi(buf);
-    if (msgNum == 1 && nmeaField(line, 3, buf, sizeof(buf)) > 0)
-        accVisible += (uint8_t)atoi(buf);
-    for (int sat = 0; sat < 4; sat++) {
-        if (nmeaField(line, 7 + sat * 4, buf, sizeof(buf)) > 0) {
-            int snr = atoi(buf);
-            if (snr > accMaxSnr) accMaxSnr = snr;
-        }
-    }
 }
 
 void gpsSyncTime()
@@ -73,20 +55,65 @@ void gpsSyncTime()
     Serial.println("GPS->RTC+SYS synced (local)");
 }
 
+// Конфигурируем модуль ТОЛЬКО через интерфейс ключей (VALSET). MIA-M10Q —
+// это протокол 34, где legacy-сообщения UBX-CFG-PRT/RATE/MSG/NAV5 удалены и
+// модуль на них отвечает NAK. Поэтому старые хелперы (setUART1Output,
+// setNavigationFrequency, setAutoPVT, setDynamicModel) и даже gnss.begin()
+// (он зондирует CFG-PRT в isConnected) на M10 молча проваливались — отсюда
+// «нет фикса вовсе». Конфиг кладём в RAM-слой: модуль обесточивается по
+// GPS_KEEP_MS, флеш не насилуем, на каждом включении настраиваем заново.
+static uint32_t gpsLastPvtMs = 0;          // момент последнего NAV-PVT (watchdog)
+
+static bool gpsConfigure()
+{
+    // begin лишь инициализирует порт и буферы. Его проверку связи не ждём:
+    // на M10 она зондирует CFG-PRT и всегда фейлит (3×maxWait впустую), а
+    // результат нам не нужен — о готовности судим по ACK на VALSET ниже.
+    gnss.begin(Serial1, 25, true);
+
+    // Критичная транзакция: вывод UBX по UART1, NAV-PVT каждую эпоху, частота,
+    // динамическая модель. По её ACK судим, что модуль жив и настроен.
+    gnss.newCfgValset(VAL_LAYER_RAM);
+    gnss.addCfgValset8 (UBLOX_CFG_UART1OUTPROT_UBX,       1);
+    gnss.addCfgValset8 (UBLOX_CFG_UART1OUTPROT_NMEA,      0);   // глушим NMEA-шум
+    gnss.addCfgValset8 (UBLOX_CFG_UART1INPROT_UBX,        1);
+    gnss.addCfgValset8 (UBLOX_CFG_MSGOUT_UBX_NAV_PVT_UART1, 1); // PVT каждую эпоху
+    gnss.addCfgValset16(UBLOX_CFG_RATE_MEAS, cfg::GPS_MEAS_MS);
+    gnss.addCfgValset16(UBLOX_CFG_RATE_NAV,  cfg::GPS_NAV_RATIO);
+    gnss.addCfgValset8 (UBLOX_CFG_NAVSPG_DYNMODEL, DYN_MODEL_PORTABLE);
+    bool ok = gnss.sendCfgValset(300);
+
+    // Все созвездия + SBAS — отдельной транзакцией: даже если модуль отвергнет
+    // какую-то комбинацию, базовый вывод PVT выше уже применён. M10 тянет
+    // GPS+GLONASS+Galileo+BeiDou одновременно, плюс QZSS и SBAS-аугментацию.
+    gnss.newCfgValset(VAL_LAYER_RAM);
+    gnss.addCfgValset8(UBLOX_CFG_SIGNAL_GPS_ENA,  1);
+    gnss.addCfgValset8(UBLOX_CFG_SIGNAL_GAL_ENA,  1);
+    gnss.addCfgValset8(UBLOX_CFG_SIGNAL_BDS_ENA,  1);
+    gnss.addCfgValset8(UBLOX_CFG_SIGNAL_GLO_ENA,  1);
+    gnss.addCfgValset8(UBLOX_CFG_SIGNAL_QZSS_ENA, 1);
+    gnss.addCfgValset8(UBLOX_CFG_SIGNAL_SBAS_ENA, 1);
+    gnss.sendCfgValset(300);
+
+    // На M10 setAutoPVT (CFG-MSG) недоступен — вывод PVT уже включён ключом выше.
+    // assumeAutoPVT говорит библиотеке «данные приходят сами»: getPVT() лишь
+    // разбирает буфер и не пытается слать legacy-поллы.
+    gnss.assumeAutoPVT(true);
+
+    gnssOk = ok;
+    if (ok) gpsLastPvtMs = millis();       // дать модулю время до watchdog-проверки
+    return ok;
+}
+
 void gpsPowerOn()
 {
     if (state::gpsActive) return;
     watch.powerControl(POWER_GPS, true);   // питание модуля (BLDO1)
-    delay(50);
-    Serial1.setRxBufferSize(1024);         // запас под UBX-пакеты
+    delay(200);                            // M10 нужно время на старт после подачи питания
+    Serial1.setRxBufferSize(2048);         // запас под UBX-пакеты на 4 Гц
     Serial1.begin(cfg::GPS_BAUD, SERIAL_8N1, cfg::GPS_PIN_RX, cfg::GPS_PIN_TX);
-    gnssOk = gnss.begin(Serial1);
-    if (gnssOk) {
-        gnss.setUART1Output(COM_TYPE_UBX);   // только UBX — никакого NMEA-шума
-        gnss.setNavigationFrequency(4);      // 4 Гц
-        gnss.setAutoPVT(true);               // модуль сам шлёт PVT, getPVT() не блокирует
-    }
     state::gpsActive = true;
+    gpsConfigure();                        // если не поднялся — readGPS до-настроит
     Serial.printf("GPS power ON, gnss=%d\n", gnssOk);
 }
 
@@ -99,6 +126,7 @@ void gpsPowerOff()
     state::gpsActive = false;
     state::gpsFix = 0;
     state::gpsVisible = 0;
+    state::gpsHacc = 0;
     state::gpsHasPrev = false;             // следующий заход — новый трек
     Serial.println("GPS power OFF");
 }
@@ -106,17 +134,30 @@ void gpsPowerOff()
 // Читаем GPS только когда питание включено (экраны 1/4)
 void readGPS()
 {
-    if (!state::gpsActive || !gnssOk) return;
+    if (!state::gpsActive) return;
+
+    // Не настроились (холодный старт / конфиг не лёг) — периодически пробуем.
+    // Сюда же попадаем, если NAV-PVT молчит >5с: значит конфиг не применился.
+    if (!gnssOk || (millis() - gpsLastPvtMs > 5000)) {
+        static uint32_t lastTry = 0;
+        if (millis() - lastTry < 3000) return;
+        lastTry = millis();
+        gpsConfigure();                    // короткие таймауты внутри — UI не вешаем
+        return;
+    }
+
     static uint32_t last = 0;
     if (millis() - last < 250) return;
     last = millis();
 
     if (!gnss.getPVT()) return;            // нет свежего решения
+    gpsLastPvtMs = millis();
 
     uint8_t fix = gnss.getFixType();
     state::gpsFix     = fix;
     state::gpsVisible = gnss.getSIV();
     state::gpsPdop    = gnss.getPDOP() / 100.0f;
+    state::gpsHacc    = gnss.getHorizontalAccEst() / 1000.0f;   // мм -> м
 
     if (fix >= 2) {
         double lat = gnss.getLatitude()  * 1e-7;

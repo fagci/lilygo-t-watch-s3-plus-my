@@ -49,8 +49,10 @@ namespace cfg {
     constexpr char     TZ[]           = "UTC0";
     constexpr long     UTC_OFFSET_SEC = 3 * 3600;
 
-    constexpr int      GPS_PIN_RX     = 42;
-    constexpr int      GPS_PIN_TX     = 41;
+    // Имена — со стороны ЧИПА GNSS. В Serial1.begin(baud,cfg,espRx,espTx)
+    // пины ESP, поэтому ESP RX <- GNSS TX (41), ESP TX -> GNSS RX (42).
+    constexpr int      GPS_PIN_RX     = 42;      // RX чипа GNSS (вход) <- ESP TX
+    constexpr int      GPS_PIN_TX     = 41;      // TX чипа GNSS (выход) -> ESP RX
     constexpr uint32_t GPS_BAUD       = 38400;   // заводской бод MIA-M10Q
     constexpr uint32_t GPS_KEEP_MS    = 5UL * 60 * 1000;
     constexpr uint16_t GPS_MEAS_MS    = 250;     // период измерений (4 Гц)
@@ -104,6 +106,7 @@ namespace state {
 
     // Диагностика линка и спутников (экран GPS)
     extern uint32_t gpsBaud;          // выбранный бод UART
+    extern int8_t   gpsRxPin;         // активный пин приёма ESP (диагностика распиновки)
     extern uint16_t gpsRawBytes;      // сырьё с UART за окно пробы (~200мс)
     extern bool     gpsSawUbx;        // в сырье замечен UBX (0xB5)
     extern bool     gpsSawNmea;       // в сырье замечен NMEA ('$')

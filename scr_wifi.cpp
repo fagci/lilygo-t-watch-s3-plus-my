@@ -49,6 +49,7 @@ namespace recon {
     // Сводка по принятым кадрам — понять природу трафика (норм/мусор/далёкие одиночки)
     static volatile uint32_t cntTotal = 0, cntMgmt = 0, cntData = 0, cntCtrl = 0;
     static volatile uint32_t cntBeacon = 0, cntProbe = 0, cntWeak = 0;   // weak = RSSI < -85
+    static volatile uint32_t cntErr = 0;                                 // кадры с ошибкой приёма (FCS)
 
     static const char *encStr(uint8_t e) {
         switch (e) { case E_OPEN: return "open"; case E_WEP: return "WEP";
@@ -181,8 +182,11 @@ namespace recon {
 
     static void cb(void *buf, wifi_promiscuous_pkt_type_t type) {
         const wifi_promiscuous_pkt_t *p = (const wifi_promiscuous_pkt_t *)buf;
+        // rx_state != 0 -> ошибка приёма (FCS/CRC и т.п.). Именно такие битые кадры
+        // дают фантомы: флип бит в type/DS/адресах лепит ложные AP/клиентов.
+        if (p->rx_ctrl.rx_state != 0) { cntErr++; return; }
         const uint8_t *fr = p->payload;
-        int len = p->rx_ctrl.sig_len;
+        int len = (int)p->rx_ctrl.sig_len - 4;            // sig_len включает FCS(4) — отрезаем
         if (len < 24) return;
         int8_t rssi = p->rx_ctrl.rssi;
         uint8_t ch = p->rx_ctrl.channel;
@@ -250,7 +254,7 @@ namespace recon {
         if (started) return;
         portENTER_CRITICAL(&mux); count = 0; probeN = 0; edgeN = 0; portEXIT_CRITICAL(&mux);
         cntDeauth = cntDisassoc = 0;
-        cntTotal = cntMgmt = cntData = cntCtrl = cntBeacon = cntProbe = cntWeak = 0;
+        cntTotal = cntMgmt = cntData = cntCtrl = cntBeacon = cntProbe = cntWeak = cntErr = 0;
         hopping = (fixedCh == 0);
         channel = fixedCh ? fixedCh : 1;
         hopLast = millis();
@@ -659,18 +663,22 @@ namespace scrRecon {
             baseTot = tot; baseMs = now;
         }
         uint32_t weakPct = tot ? (recon::cntWeak * 100 / tot) : 0;
+        uint32_t errAll = tot + recon::cntErr;            // ошибочные отброшены до счёта total
+        uint32_t errPct = errAll ? (recon::cntErr * 100 / errAll) : 0;
         snprintf(list, LIST_SZ,
                  "total %lu  (%lu/s)\n"
                  "mgmt %lu  data %lu  ctrl %lu\n"
                  "beacon %lu  probe %lu\n"
                  "deauth %lu  disas %lu\n"
                  "weak<-85: %lu (%lu%%)\n"
+                 "FCS-err: %lu (%lu%%)\n"
                  "nodes %d  links %d",
                  (unsigned long)tot, (unsigned long)rate,
                  (unsigned long)recon::cntMgmt, (unsigned long)recon::cntData, (unsigned long)recon::cntCtrl,
                  (unsigned long)recon::cntBeacon, (unsigned long)recon::cntProbe,
                  (unsigned long)recon::cntDeauth, (unsigned long)recon::cntDisassoc,
                  (unsigned long)recon::cntWeak, (unsigned long)weakPct,
+                 (unsigned long)recon::cntErr, (unsigned long)errPct,
                  snapN, edgeSnapN);
         lv_label_set_text(lblList, list);
         return;

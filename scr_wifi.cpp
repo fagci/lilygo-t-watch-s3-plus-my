@@ -336,7 +336,6 @@ namespace scrRecon {
     static bool     sampInit = false;
     static uint32_t sampMs = 0;
     static lv_obj_t *sbTrack = nullptr, *sbThumb = nullptr;   // скроллбар
-    static lv_obj_t *rBar[ROWS_APS] = {nullptr};             // прогрессбар RSSI под строкой
 
     static bool withGraph() { return view == V_AP || view == V_STA; }
     static int listTop()  { return withGraph() ? LIST_AP_Y : LIST_APS_Y; }
@@ -397,23 +396,6 @@ namespace scrRecon {
         lv_obj_set_style_bg_opa(sbThumb, LV_OPA_COVER, 0);
         lv_obj_add_flag(sbTrack, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(sbThumb, LV_OBJ_FLAG_HIDDEN);
-
-        // Прогрессбары уровня сигнала: тонкая полоса под каждой видимой строкой
-        for (int i = 0; i < ROWS_APS; i++) {
-            lv_obj_t *b = lv_bar_create(root);
-            lv_obj_set_size(b, LV_HOR_RES - 12, 5);
-            lv_bar_set_range(b, -95, -35);
-            lv_obj_set_style_bg_color(b, lv_color_hex(0x202020), LV_PART_MAIN);
-            lv_obj_set_style_radius(b, 2, LV_PART_MAIN);
-            lv_obj_set_style_radius(b, 2, LV_PART_INDICATOR);
-            lv_obj_add_flag(b, LV_OBJ_FLAG_HIDDEN);
-            rBar[i] = b;
-        }
-    }
-
-    static void barsHide() {
-        for (int i = 0; i < ROWS_APS; i++)
-            if (rBar[i]) lv_obj_add_flag(rBar[i], LV_OBJ_FLAG_HIDDEN);
     }
 
     static void updateScrollbar() {
@@ -497,10 +479,16 @@ namespace scrRecon {
         else snprintf(out, n, "%02X%02X%02X", a.mac[3], a.mac[4], a.mac[5]);
     }
 
-    // Цвет полосы по уровню RSSI: зелёный (близко) -> красный (далеко)
-    static uint32_t rssiColor(int8_t rssi) {
-        return rssi >= -55 ? 0x00FF88 : rssi >= -70 ? 0x00CCFF
-             : rssi >= -80 ? 0xFFAA00 : 0xFF4444;
+    // Встроенный индикатор RSSI: 4 ячейки '•' (есть) / '·' (нет). Часть строки
+    // метрик — выровнен идеально, в отличие от наложенного виджета-бара.
+    static void rssiBar(int8_t rssi, char *out, int outsz) {
+        const int cells = 4;
+        int f = (rssi + 95) / 15;            // -95..-35 -> 0..4
+        if (f < 0) f = 0; if (f > cells) f = cells;
+        int o = 0;
+        for (int i = 0; i < cells && o < outsz - 3; i++)
+            o += snprintf(out + o, outsz - o, "%s", i < f ? "\xE2\x80\xA2" : "\xC2\xB7");
+        out[o] = 0;
     }
 
     // Аптайм точки из TSF (мкс) -> компактно: "3d4h" / "5h12m" / "47m" / "-"
@@ -604,7 +592,6 @@ namespace scrRecon {
 
     lv_obj_set_y(lblList, listTop());
     updateScrollbar();
-    barsHide();                                          // спрячем все RSSI-бары; основной цикл покажет нужные
 
     static const int LIST_SZ = 600;                      // [FIX 2] константа размера
     char list[LIST_SZ];
@@ -705,30 +692,24 @@ namespace scrRecon {
 
         char buf[120];
         buf[0] = '\0';                                    // [FIX 4]
+        char bar[16]; rssiBar(d.rssi, bar, sizeof(bar));  // индикатор сигнала в строке метрик
 
         if (view == V_APS) {
             char nm[18]; apName(d, nm, sizeof(nm));
             // ⚠ перед именем = у точки откатывался TSF (ребут/подменный маяк)
-            snprintf(buf, sizeof(buf), "%s%-.18s\n%4d ch%-2d %-4s u%2" PRIu32 " %3" PRIu32 "s",
+            snprintf(buf, sizeof(buf), "%s%-.18s\n%s %4d ch%-2d %-4s u%2" PRIu32 " %3" PRIu32 "s",
                      d.tsfReset ? LV_SYMBOL_WARNING " " : "",
-                     nm, d.rssi, d.ch, encOf(d),
+                     nm, bar, d.rssi, d.ch, encOf(d),
                      clientsOf(d.mac, now), age);         // [FIX 3] PRIu32 вместо %lu
         } else if (view == V_DEVS) {
             char dl[18]; devLabel(d.mac, dl, sizeof(dl));
-            snprintf(buf, sizeof(buf), "%-.18s\n%4d %6" PRIu32 "p %2dnet %3" PRIu32 "s",
-                     dl, d.rssi, d.packets, pnlCount(d.mac), age);
+            snprintf(buf, sizeof(buf), "%-.18s\n%s %4d %6" PRIu32 "p %2dnet %3" PRIu32 "s",
+                     dl, bar, d.rssi, d.packets, pnlCount(d.mac), age);
         } else {   // V_AP — клиенты точки
             char dl[18]; devLabel(d.mac, dl, sizeof(dl));
-            snprintf(buf, sizeof(buf), "%-.18s\n%4d %6" PRIu32 "p %3" PRIu32 "s",
-                     dl, d.rssi, d.packets, age);
+            snprintf(buf, sizeof(buf), "%-.18s\n%s %4d %6" PRIu32 "p %3" PRIu32 "s",
+                     dl, bar, d.rssi, d.packets, age);
         }
-
-        // Прогрессбар уровня сигнала под строкой (слот = индекс видимой строки)
-        int rv = d.rssi < -95 ? -95 : d.rssi > -35 ? -35 : d.rssi;
-        lv_obj_set_pos(rBar[r], 6, listTop() + r * ROW_H + ROW_H - 7);
-        lv_bar_set_value(rBar[r], rv, LV_ANIM_OFF);
-        lv_obj_set_style_bg_color(rBar[r], lv_color_hex(rssiColor(d.rssi)), LV_PART_INDICATOR);
-        lv_obj_clear_flag(rBar[r], LV_OBJ_FLAG_HIDDEN);
 
         buf[sizeof(buf) - 1] = '\0';                     // [FIX 4]
         for (char *p = buf; *p; p++) if (*p == '#') *p = '_';

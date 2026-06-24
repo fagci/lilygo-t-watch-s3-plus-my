@@ -21,8 +21,10 @@ namespace state {
     volatile int      curScreen=0; volatile bool scrChanged=false;
     volatile uint32_t lastActivity=0; bool screenDimmed=false, screenOff=false;
     bool gpsActive=false,gpsSynced=false; float speedKmh=0;
-    uint8_t gpsVisible=0,gpsMaxSnr=0; uint32_t gpsChars=0,gpsFailCsum=0,gpsLastCharMs=0;
+    uint8_t gpsVisible=0;
     uint8_t gpsFix=0; double gpsLat=0,gpsLon=0; float gpsAlt=0,gpsPdop=99.9f,gpsHacc=0;
+    uint32_t gpsBaud=0; uint16_t gpsRawBytes=0; bool gpsSawUbx=false,gpsSawNmea=false;
+    uint8_t gpsProtVer=0,gpsSivView=0; GpsSat gpsSats[GPS_SAT_MAX]={}; uint8_t gpsSatCount=0;
     double distanceM=0,gpsPrevLat=0,gpsPrevLon=0; bool gpsHasPrev=false;
     uint32_t stepCount=0,pomStart=0,stepsAtStart=0;
     int16_t lpdRssi[cfg::LPD_CHANS]; bool lpdDirty=false;
@@ -64,20 +66,57 @@ void gpsSyncTime()
 // GPS_KEEP_MS, флеш не насилуем, на каждом включении настраиваем заново.
 static uint32_t gpsLastPvtMs = 0;          // момент последнего NAV-PVT (watchdog)
 
+// Сырая проба UART: читаем напрямую N мс, считаем байты и ищем признаки
+// протокола (UBX 0xB5, NMEA '$'). Работает даже если чип НЕ u-blox — на экране
+// сразу видно, жив ли модуль и тот ли бод. Бод не подходит → байтов ноль/мусор.
+static uint16_t gpsProbeRaw(uint16_t ms, bool &ubx, bool &nmea)
+{
+    while (Serial1.available()) Serial1.read();   // слить хвост от смены бода
+    uint16_t bytes = 0; ubx = false; nmea = false;
+    uint32_t t = millis();
+    while (millis() - t < ms) {
+        while (Serial1.available()) {
+            uint8_t b = Serial1.read();
+            if (bytes < 0xFFFF) bytes++;
+            if (b == 0xB5) ubx  = true;
+            if (b == '$')  nmea = true;
+        }
+    }
+    return bytes;
+}
+
 static bool gpsConfigure()
 {
-    // begin лишь инициализирует порт и буферы. Его проверку связи не ждём:
-    // на M10 она зондирует CFG-PRT и всегда фейлит (3×maxWait впустую), а
-    // результат нам не нужен — о готовности судим по ACK на VALSET ниже.
+    // 1) Подбор бода + проба линка. Пробуем текущий бод; если тишина — на
+    //    следующем заходе берём другой из списка (скан размазан по ретраям,
+    //    чтобы не вешать UI). Результат пробы кладём в state для экрана.
+    static const uint32_t BAUDS[] = { 38400, 9600, 115200, 57600 };
+    uint32_t baud = state::gpsBaud ? state::gpsBaud : BAUDS[0];
+    Serial1.updateBaudRate(baud);
+    delay(20);
+    bool ubx, nmea;
+    uint16_t raw = gpsProbeRaw(200, ubx, nmea);
+    state::gpsBaud = baud; state::gpsRawBytes = raw;
+    state::gpsSawUbx = ubx; state::gpsSawNmea = nmea;
+    if (raw < 20) {                                // тишина — сменим бод к след. разу
+        static uint8_t idx = 0;
+        idx = (idx + 1) & 3;
+        state::gpsBaud = BAUDS[idx];
+    }
+
+    // 2) begin лишь инициализирует порт/буферы. Его проверку связи не ждём:
+    //    на M10 она зондирует CFG-PRT и всегда фейлит (3×maxWait впустую),
+    //    результат не нужен — о готовности судим по ACK на VALSET ниже.
     gnss.begin(Serial1, 25, true);
 
-    // Критичная транзакция: вывод UBX по UART1, NAV-PVT каждую эпоху, частота,
-    // динамическая модель. По её ACK судим, что модуль жив и настроен.
+    // 3) Критичная транзакция: вывод UBX по UART1, NAV-PVT и NAV-SAT, частота,
+    //    динамическая модель. По её ACK судим, что модуль жив и настроен.
     gnss.newCfgValset(VAL_LAYER_RAM);
     gnss.addCfgValset8 (UBLOX_CFG_UART1OUTPROT_UBX,       1);
     gnss.addCfgValset8 (UBLOX_CFG_UART1OUTPROT_NMEA,      0);   // глушим NMEA-шум
     gnss.addCfgValset8 (UBLOX_CFG_UART1INPROT_UBX,        1);
     gnss.addCfgValset8 (UBLOX_CFG_MSGOUT_UBX_NAV_PVT_UART1, 1); // PVT каждую эпоху
+    gnss.addCfgValset8 (UBLOX_CFG_MSGOUT_UBX_NAV_SAT_UART1, 4); // спутники ~1 Гц
     gnss.addCfgValset16(UBLOX_CFG_RATE_MEAS, cfg::GPS_MEAS_MS);
     gnss.addCfgValset16(UBLOX_CFG_RATE_NAV,  cfg::GPS_NAV_RATIO);
     gnss.addCfgValset8 (UBLOX_CFG_NAVSPG_DYNMODEL, DYN_MODEL_PORTABLE);
@@ -95,13 +134,17 @@ static bool gpsConfigure()
     gnss.addCfgValset8(UBLOX_CFG_SIGNAL_SBAS_ENA, 1);
     gnss.sendCfgValset(300);
 
-    // На M10 setAutoPVT (CFG-MSG) недоступен — вывод PVT уже включён ключом выше.
-    // assumeAutoPVT говорит библиотеке «данные приходят сами»: getPVT() лишь
-    // разбирает буфер и не пытается слать legacy-поллы.
+    // На M10 setAutoPVT/NAVSAT (CFG-MSG) недоступны — вывод уже включён ключами
+    // выше. assume* говорит библиотеке «данные приходят сами»: get* лишь
+    // разбирают буфер и не шлют legacy-поллы.
     gnss.assumeAutoPVT(true);
+    gnss.assumeAutoNAVSAT(true);
 
     gnssOk = ok;
-    if (ok) gpsLastPvtMs = millis();       // дать модулю время до watchdog-проверки
+    if (ok) {
+        gpsLastPvtMs = millis();           // дать модулю время до watchdog-проверки
+        state::gpsProtVer = gnss.getProtocolVersionHigh(300);   // тип/версия чипа
+    }
     return ok;
 }
 
@@ -127,8 +170,37 @@ void gpsPowerOff()
     state::gpsFix = 0;
     state::gpsVisible = 0;
     state::gpsHacc = 0;
+    state::gpsSivView = 0;
+    state::gpsSatCount = 0;
     state::gpsHasPrev = false;             // следующий заход — новый трек
     Serial.println("GPS power OFF");
+}
+
+// Снимок UBX-NAV-SAT в state: список спутников (созвездие/svId/cno/used),
+// отсортированный по cno (сильные сверху). Вызывается из readGPS.
+static void readNavSat()
+{
+    if (!gnss.getNAVSAT() || gnss.packetUBXNAVSAT == NULL) return;
+    uint8_t n = gnss.packetUBXNAVSAT->data.header.numSvs;
+    state::gpsSivView = n;
+    uint8_t cnt = 0;
+    for (uint8_t i = 0; i < n && cnt < GPS_SAT_MAX; i++) {
+        UBX_NAV_SAT_block_t &b = gnss.packetUBXNAVSAT->data.blocks[i];
+        if (b.cno == 0 && !b.flags.bits.svUsed) continue;   // не тратим место на «пустые»
+        state::gpsSats[cnt++] = { b.gnssId, b.svId, b.cno,
+                                  (uint8_t)b.flags.bits.svUsed };
+    }
+    // вставкой по убыванию cno — массив маленький
+    for (uint8_t i = 1; i < cnt; i++) {
+        GpsSat k = state::gpsSats[i];
+        int j = i - 1;
+        while (j >= 0 && state::gpsSats[j].cno < k.cno) {
+            state::gpsSats[j + 1] = state::gpsSats[j]; j--;
+        }
+        state::gpsSats[j + 1] = k;
+    }
+    state::gpsSatCount = cnt;
+    gnss.flushNAVSAT();        // пометить прочитанным: getNAVSAT даст true лишь на свежем
 }
 
 // Читаем GPS только когда питание включено (экраны 1/4)
@@ -149,6 +221,8 @@ void readGPS()
     static uint32_t last = 0;
     if (millis() - last < 250) return;
     last = millis();
+
+    readNavSat();                          // снимок спутников (если пришёл NAV-SAT)
 
     if (!gnss.getPVT()) return;            // нет свежего решения
     gpsLastPvtMs = millis();

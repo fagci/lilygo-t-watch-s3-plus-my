@@ -44,6 +44,17 @@ namespace scrSpeed {
 namespace scrGps {
     lv_obj_t *root;
     static lv_obj_t *lblFix, *lblSats;
+
+    // gnssId -> буква созвездия (G GPS, R ГЛОНАСС, E Galileo, B BeiDou,
+    // Q QZSS, S SBAS).
+    static char gnssLetter(uint8_t id) {
+        switch (id) {
+            case 0: return 'G'; case 1: return 'S'; case 2: return 'E';
+            case 3: return 'B'; case 5: return 'Q'; case 6: return 'R';
+            default: return '?';
+        }
+    }
+
     void build(lv_obj_t *parent) {
         root = parent;
         lv_obj_set_style_bg_color(root, lv_color_black(), 0);
@@ -54,9 +65,9 @@ namespace scrGps {
         lv_label_set_long_mode(lblFix, LV_LABEL_LONG_WRAP);
         lv_label_set_text(lblFix, "waiting...");
 
-        // Список спутников ниже
+        // Список спутников ниже шапки
         lblSats = makeLabel(root, UI_FONT, 0xAAAAAA,
-                            LV_ALIGN_TOP_LEFT, 4, cfg::CONTENT_TOP + 112);
+                            LV_ALIGN_TOP_LEFT, 4, cfg::CONTENT_TOP + 86);
         lv_obj_set_width(lblSats, LV_HOR_RES - 8);
         lv_label_set_long_mode(lblSats, LV_LABEL_LONG_WRAP);
         lv_label_set_text(lblSats, "");
@@ -69,41 +80,79 @@ namespace scrGps {
 
         char buf[256];
 
-        // Сводка фикса
+        // ── Линк мёртв: показываем диагностику UART, чтобы было НЕ глухо ──
+        if (!gnssOk) {
+            snprintf(buf, sizeof(buf),
+                LV_SYMBOL_GPS " LINK DOWN\n"
+                "baud: %lu\n"
+                "raw: %u B / 200ms\n"
+                "ubx: %s   nmea: %s\n"
+                "configuring...",
+                (unsigned long)state::gpsBaud, state::gpsRawBytes,
+                state::gpsSawUbx ? "Y" : "N", state::gpsSawNmea ? "Y" : "N");
+            lv_obj_set_style_text_color(lblFix, lv_color_hex(0xFF4444), 0);
+            lv_label_set_text(lblFix, buf);
+            lv_label_set_text(lblSats,
+                state::gpsRawBytes ? "поток есть, ждём UBX..."
+                                   : "тишина на UART — ищем бод/питание");
+            return;
+        }
+
+        // ── Шапка: фикс/поиск + ключевые цифры ──
         if (state::gpsFix >= 2) {
             snprintf(buf, sizeof(buf),
-                LV_SYMBOL_GPS " FIX %dD  SIV:%u\n"
-                "lat: %.6f\n"
-                "lon: %.6f\n"
-                "alt: %.0fm  spd: %.1f\n"
-                "pDOP: %.1f  acc: %.1fm\n"
-                "dist: %.0fm",
-                state::gpsFix, state::gpsVisible,
+                LV_SYMBOL_GPS " FIX %dD  use:%u/%u\n"
+                "%.6f %.6f\n"
+                "alt:%.0fm spd:%.1f acc:%.1fm\n"
+                "pDOP:%.1f dist:%.0fm pv:%u",
+                state::gpsFix, state::gpsVisible, state::gpsSivView,
                 state::gpsLat, state::gpsLon,
-                state::gpsAlt, state::speedKmh,
-                state::gpsPdop, state::gpsHacc, state::distanceM);
+                state::gpsAlt, state::speedKmh, state::gpsHacc,
+                state::gpsPdop, state::distanceM, state::gpsProtVer);
             lv_obj_set_style_text_color(lblFix, lv_color_hex(0x00FF88), 0);
         } else {
             uint32_t s = millis() / 1000;
             snprintf(buf, sizeof(buf),
-                LV_SYMBOL_GPS " NO FIX  SIV:%u\n"
+                LV_SYMBOL_GPS " NO FIX  use:%u/%u\n"
                 "search: %02lu:%02lu\n"
-                "pDOP: %.1f\n"
-                "gnss: %s  synced: %s",
-                state::gpsVisible,
+                "pDOP:%.1f  pv:%u  sync:%s\n"
+                "baud:%lu",
+                state::gpsVisible, state::gpsSivView,
                 s / 60, s % 60,
-                state::gpsPdop,
-                gnssOk ? "ok" : "DOWN",
-                state::gpsSynced ? "Y" : "N");
-            lv_obj_set_style_text_color(lblFix, lv_color_hex(0xFF4444), 0);
+                state::gpsPdop, state::gpsProtVer,
+                state::gpsSynced ? "Y" : "N",
+                (unsigned long)state::gpsBaud);
+            lv_obj_set_style_text_color(lblFix, lv_color_hex(0xFFCC44), 0);
         }
         lv_label_set_text(lblFix, buf);
 
-        // Сводка: спутники в решении и дистанция
-        char sbuf[80];
-        snprintf(sbuf, sizeof(sbuf),
-            "SIV: %u\nDistance: %.2f km\npDOP: %.1f",
-            state::gpsVisible, state::distanceM / 1000.0, state::gpsPdop);
+        // ── Спутники: сводка по созвездиям + список (svId/cno, * = в фиксе) ──
+        char sbuf[512];
+        int p = 0;
+        uint8_t vCnt[8] = {0}, uCnt[8] = {0};
+        for (uint8_t i = 0; i < state::gpsSatCount; i++) {
+            uint8_t g = state::gpsSats[i].gnss;
+            if (g < 8) { vCnt[g]++; if (state::gpsSats[i].used) uCnt[g]++; }
+        }
+        // сводная строка по созвездиям с непустым счётчиком
+        for (uint8_t g = 0; g < 8 && p < (int)sizeof(sbuf) - 16; g++) {
+            if (!vCnt[g]) continue;
+            p += snprintf(sbuf + p, sizeof(sbuf) - p, "%c%u/%u ",
+                          gnssLetter(g), uCnt[g], vCnt[g]);
+        }
+        p += snprintf(sbuf + p, sizeof(sbuf) - p, "\n");
+        // сами спутники, сильные сверху (массив уже отсортирован по cno).
+        // Формат "G05:48*" — буква созвездия, svId, cno, * если в фиксе.
+        // 3 в ряд; экран узкий, показываем сколько влезает в буфер.
+        for (uint8_t i = 0; i < state::gpsSatCount && i < 24 && p < (int)sizeof(sbuf) - 12; i++) {
+            const GpsSat &sv = state::gpsSats[i];
+            p += snprintf(sbuf + p, sizeof(sbuf) - p, "%c%02u:%02u%c%s",
+                          gnssLetter(sv.gnss), sv.sv, sv.cno,
+                          sv.used ? '*' : ' ',
+                          (i % 3 == 2) ? "\n" : " ");
+        }
+        if (state::gpsSatCount == 0)
+            snprintf(sbuf + p, sizeof(sbuf) - p, "no sats yet");
         lv_label_set_text(lblSats, sbuf);
     }
 }

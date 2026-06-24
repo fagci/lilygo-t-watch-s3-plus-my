@@ -23,7 +23,7 @@ namespace state {
     bool gpsActive=false,gpsSynced=false; float speedKmh=0;
     uint8_t gpsVisible=0;
     uint8_t gpsFix=0; double gpsLat=0,gpsLon=0; float gpsAlt=0,gpsPdop=99.9f,gpsHacc=0;
-    uint32_t gpsBaud=0; uint16_t gpsRawBytes=0; bool gpsSawUbx=false,gpsSawNmea=false;
+    uint32_t gpsBaud=0; int8_t gpsRxPin=-1; uint16_t gpsRawBytes=0; bool gpsSawUbx=false,gpsSawNmea=false;
     uint8_t gpsProtVer=0,gpsSivView=0; GpsSat gpsSats[GPS_SAT_MAX]={}; uint8_t gpsSatCount=0;
     double distanceM=0,gpsPrevLat=0,gpsPrevLon=0; bool gpsHasPrev=false;
     uint32_t stepCount=0,pomStart=0,stepsAtStart=0;
@@ -74,6 +74,8 @@ static uint16_t gpsProbeRaw(uint16_t ms, bool &ubx, bool &nmea)
     while (Serial1.available()) Serial1.read();   // слить хвост от смены бода
     uint16_t bytes = 0; ubx = false; nmea = false;
     uint32_t t = millis();
+    // Окно должно перекрывать период вывода: NMEA по умолчанию идёт пачкой
+    // ~1 раз/с, короткое окно может её проспать и зря сменить пины/бод.
     while (millis() - t < ms) {
         while (Serial1.available()) {
             uint8_t b = Serial1.read();
@@ -81,27 +83,58 @@ static uint16_t gpsProbeRaw(uint16_t ms, bool &ubx, bool &nmea)
             if (b == 0xB5) ubx  = true;
             if (b == '$')  nmea = true;
         }
+        if (bytes >= 80) break;                   // поток явно есть — не ждём всё окно
     }
     return bytes;
 }
 
+// Кандидаты распиновки UART. Имена констант — со стороны ЧИПА, поэтому
+// «правильный» порядок: ESP RX <- GNSS TX, ESP TX -> GNSS RX. Второй вариант
+// (перевёрнутый) — страховка под иную плату/распайку, подберётся пробой.
+struct GpsPins { int8_t rx, tx; };
+static const GpsPins GPS_PINS[] = {
+    { (int8_t)cfg::GPS_PIN_TX, (int8_t)cfg::GPS_PIN_RX },   // ESP RX=41, TX=42
+    { (int8_t)cfg::GPS_PIN_RX, (int8_t)cfg::GPS_PIN_TX },   // перевёрнутый
+};
+static const uint32_t GPS_BAUDS[] = { 38400, 9600, 115200, 57600 };
+static uint8_t gpsPinIdx = 0, gpsBaudIdx = 0;
+
+// (Пере)открыть Serial1 с текущими кандидатами пинов и бода.
+static void gpsOpenUart()
+{
+    Serial1.end();
+    Serial1.setRxBufferSize(2048);
+    Serial1.begin(GPS_BAUDS[gpsBaudIdx], SERIAL_8N1,
+                  GPS_PINS[gpsPinIdx].rx, GPS_PINS[gpsPinIdx].tx);
+    state::gpsBaud  = GPS_BAUDS[gpsBaudIdx];
+    state::gpsRxPin = GPS_PINS[gpsPinIdx].rx;
+}
+
+// Следующий кандидат линка: сначала перебираем распиновку (она под подозрением),
+// и лишь пройдя оба варианта — двигаем бод (он заявлен 38400, но мало ли).
+static void gpsAdvanceScan()
+{
+    gpsPinIdx ^= 1;
+    if (gpsPinIdx == 0 && ++gpsBaudIdx >= 4) gpsBaudIdx = 0;
+}
+
 static bool gpsConfigure()
 {
-    // 1) Подбор бода + проба линка. Пробуем текущий бод; если тишина — на
-    //    следующем заходе берём другой из списка (скан размазан по ретраям,
-    //    чтобы не вешать UI). Результат пробы кладём в state для экрана.
-    static const uint32_t BAUDS[] = { 38400, 9600, 115200, 57600 };
-    uint32_t baud = state::gpsBaud ? state::gpsBaud : BAUDS[0];
-    Serial1.updateBaudRate(baud);
+    static uint8_t failStreak = 0;
+
+    // 1) Открыть UART с текущими пинами+бодом и попробовать линк. Тишина →
+    //    сразу следующий кандидат. На молчащей линии VALSET слать смысла нет.
+    gpsOpenUart();
     delay(20);
     bool ubx, nmea;
-    uint16_t raw = gpsProbeRaw(200, ubx, nmea);
-    state::gpsBaud = baud; state::gpsRawBytes = raw;
+    uint16_t raw = gpsProbeRaw(1100, ubx, nmea);
+    state::gpsRawBytes = raw;
     state::gpsSawUbx = ubx; state::gpsSawNmea = nmea;
-    if (raw < 20) {                                // тишина — сменим бод к след. разу
-        static uint8_t idx = 0;
-        idx = (idx + 1) & 3;
-        state::gpsBaud = BAUDS[idx];
+    if (raw < 20) {                                // нет потока — следующий кандидат
+        gpsAdvanceScan();
+        failStreak = 0;
+        gnssOk = false;
+        return false;
     }
 
     // 2) begin лишь инициализирует порт/буферы. Его проверку связи не ждём:
@@ -142,10 +175,17 @@ static bool gpsConfigure()
 
     gnssOk = ok;
     if (ok) {
+        failStreak = 0;
         gpsLastPvtMs = millis();           // дать модулю время до watchdog-проверки
         state::gpsProtVer = gnss.getProtocolVersionHigh(300);   // тип/версия чипа
+        return true;
     }
-    return ok;
+
+    // Поток на линии есть, но VALSET не подтвердился. Это либо ещё не очнувшийся
+    // модуль (даём ему пару попыток на той же комбинации), либо мусор не с того
+    // бода/распиновки — после нескольких неудач всё же двигаем скан.
+    if (++failStreak >= 3) { failStreak = 0; gpsAdvanceScan(); }
+    return false;
 }
 
 void gpsPowerOn()
@@ -153,10 +193,8 @@ void gpsPowerOn()
     if (state::gpsActive) return;
     watch.powerControl(POWER_GPS, true);   // питание модуля (BLDO1)
     delay(200);                            // M10 нужно время на старт после подачи питания
-    Serial1.setRxBufferSize(2048);         // запас под UBX-пакеты на 4 Гц
-    Serial1.begin(cfg::GPS_BAUD, SERIAL_8N1, cfg::GPS_PIN_RX, cfg::GPS_PIN_TX);
     state::gpsActive = true;
-    gpsConfigure();                        // если не поднялся — readGPS до-настроит
+    gpsConfigure();                        // сам откроет UART (пины+бод) и настроит
     Serial.printf("GPS power ON, gnss=%d\n", gnssOk);
 }
 

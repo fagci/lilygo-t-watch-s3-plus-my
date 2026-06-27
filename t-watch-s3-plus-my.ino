@@ -216,15 +216,14 @@ static void appExit()
 }
 
 // Переключение на экран по его tile-индексу k
+static uint32_t lastTileSwitchMs = 0;   // для добивки перерисовки после снапа
 static void activateTile(int k)
 {
     int scr = tileScreen[k];
     curGroup = tileGroup[k];
     curPos   = tilePos[k];
     appEnter(scr);
-    // Полная перерисовка нового тайла: снап-анимация tileview иногда оставляет
-    // на нём ошмётки соседнего экрана (большой спидометр «протекал» на GPS).
-    if (tiles[k]) lv_obj_invalidate(tiles[k]);
+    lastTileSwitchMs = millis();
     if (screens[scr].update) screens[scr].update();   // показать данные сразу, без ожидания троттла
     updateIndicators();
 }
@@ -443,7 +442,12 @@ static void buildTileview()
     }
     tileTotal = k;
 
-    lv_obj_set_style_anim_duration(tileview, 90, 0);    // снап быстрый и плавный
+    // Анимация снапа нужна: мгновенный снап (anim 0) на этом дисплее не
+    // перерисовывает открывшуюся область — соседний экран «протекает» (нотифы
+    // поверх часов и т.п.). Слайд сам затирает старый тайл. Остаточные ошмётки
+    // на осевшем тайле добиваем коротким окном инвалидации после переключения
+    // (см. lastTileSwitchMs в loop).
+    lv_obj_set_style_anim_duration(tileview, 90, 0);
     lv_obj_add_event_cb(tileview, tileEventCb, LV_EVENT_VALUE_CHANGED, NULL);
 }
 
@@ -816,6 +820,13 @@ void loop()
         if (!drawerOpen) {              // drawer перекрывает экран и статусбар
             updateStatusbar();
             screens[state::curScreen].update();
+            // Несколько кадров после снапа добиваем перерисовку осевшего тайла:
+            // VALUE_CHANGED у tileview приходит в начале анимации, а на маленьком
+            // draw-буфере финальный кадр иногда оставлял ошмётки соседнего экрана.
+            if (millis() - lastTileSwitchMs < 250) {
+                lv_obj_t *act = lv_tileview_get_tile_act(tileview);
+                if (act) lv_obj_invalidate(act);
+            }
         }
         delay(20);
     } else {

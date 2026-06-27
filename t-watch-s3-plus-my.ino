@@ -216,14 +216,14 @@ static void appExit()
 }
 
 // Переключение на экран по его tile-индексу k
-static uint32_t lastTileSwitchMs = 0;   // для добивки перерисовки после снапа
+static bool tileNeedsRefresh = false;   // форснуть полный кадр после перехода (см. loop)
 static void activateTile(int k)
 {
     int scr = tileScreen[k];
     curGroup = tileGroup[k];
     curPos   = tilePos[k];
     appEnter(scr);
-    lastTileSwitchMs = millis();
+    tileNeedsRefresh = true;
     if (screens[scr].update) screens[scr].update();   // показать данные сразу, без ожидания троттла
     updateIndicators();
 }
@@ -235,13 +235,11 @@ static void tileEventCb(lv_event_t *e)
         if (tiles[k] == act) { activateTile(k); break; }
 }
 
-// VALUE_CHANGED у tileview приходит в начале жеста — при медленном свайпе окно
-// добивающей перерисовки успевало истечь до того, как тайл осядет, и в зазорах
-// между лейблами оставался кусок предыдущего экрана. SCROLL_END приходит, когда
-// прокрутка реально завершилась — перезапускаем окно перерисовки отсюда.
+// SCROLL_END приходит, когда прокрутка реально завершилась (VALUE_CHANGED — в
+// начале жеста). Тут взводим форс полного кадра: к этому моменту тайл осел.
 static void tileScrollEndCb(lv_event_t *e)
 {
-    lastTileSwitchMs = millis();
+    tileNeedsRefresh = true;
 }
 
 // Прыжок на конкретный экран по его индексу (для быстрых переходов)
@@ -452,9 +450,8 @@ static void buildTileview()
 
     // Анимация снапа нужна: мгновенный снап (anim 0) на этом дисплее не
     // перерисовывает открывшуюся область — соседний экран «протекает» (нотифы
-    // поверх часов и т.п.). Слайд сам затирает старый тайл. Остаточные ошмётки
-    // на осевшем тайле добиваем коротким окном инвалидации после переключения
-    // (см. lastTileSwitchMs в loop).
+    // поверх часов и т.п.). Остаточные ошмётки добиваем форсом полного кадра
+    // после оседания перехода (tileNeedsRefresh -> lv_refr_now в loop).
     lv_obj_set_style_anim_duration(tileview, 90, 0);
     lv_obj_add_event_cb(tileview, tileEventCb,      LV_EVENT_VALUE_CHANGED, NULL);
     lv_obj_add_event_cb(tileview, tileScrollEndCb,  LV_EVENT_SCROLL_END,    NULL);
@@ -828,12 +825,17 @@ void loop()
         if (!drawerOpen) {              // drawer перекрывает экран и статусбар
             updateStatusbar();
             screens[state::curScreen].update();
-            // Несколько кадров после снапа добиваем перерисовку ВСЕГО экрана:
-            // VALUE_CHANGED у tileview приходит в начале анимации, а на маленьком
-            // draw-буфере финальный кадр оставлял ошмётки соседнего экрана.
-            // Инвалидация только осевшего тайла не добивала — гасим весь экран.
-            if (millis() - lastTileSwitchMs < 250)
+            // Дисплей в LV_DISPLAY_RENDER_MODE_PARTIAL: панель хранит свою GRAM,
+            // LVGL шлёт лишь «грязные» области. Зазоры между лейблами нового
+            // экрана ничем не помечаются грязными → панель держит пиксели
+            // предыдущего экрана (кусок спидометра). После оседания перехода
+            // один раз форсим ПОЛНЫЙ синхронный кадр: инвалидируем весь экран и
+            // тут же рендерим — это перекрывает GRAM целиком.
+            if (tileNeedsRefresh) {
+                tileNeedsRefresh = false;
                 lv_obj_invalidate(lv_scr_act());
+                lv_refr_now(NULL);
+            }
         }
         delay(20);
     } else {

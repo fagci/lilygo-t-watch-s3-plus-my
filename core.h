@@ -83,12 +83,15 @@ struct GpsSat {
 };
 constexpr uint8_t GPS_SAT_MAX = 48;
 
+// Состояние подсветки/питания экрана — взаимоисключающие фазы по таймауту
+// бездействия (ACTIVE -> DIMMED -> OFF). Заменяет пару bool screenDimmed/Off.
+enum class Display : uint8_t { ACTIVE, DIMMED, OFF };
+
 namespace state {
     extern volatile int      curScreen;
     extern volatile bool     scrChanged;
     extern volatile uint32_t lastActivity;
-    extern bool              screenDimmed;
-    extern bool              screenOff;
+    extern Display           display;
 
     extern bool     gpsActive;
     extern bool     gpsSynced;

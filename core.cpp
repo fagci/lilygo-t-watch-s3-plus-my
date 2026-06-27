@@ -19,7 +19,7 @@ lv_obj_t *lbl_sb_right;
 
 namespace state {
     volatile int      curScreen=0; volatile bool scrChanged=false;
-    volatile uint32_t lastActivity=0; bool screenDimmed=false, screenOff=false;
+    volatile uint32_t lastActivity=0; Display display=Display::ACTIVE;
     bool gpsActive=false,gpsSynced=false; float speedKmh=0;
     uint8_t gpsVisible=0;
     uint8_t gpsFix=0; double gpsLat=0,gpsLon=0; float gpsAlt=0,gpsPdop=99.9f,gpsHacc=0;

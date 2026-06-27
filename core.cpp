@@ -3,7 +3,7 @@
 #include "core.h"
 #include "core_state.h"
 
-SFE_UBLOX_GNSS gnss;
+SFE_UBLOX_GNSS_SERIAL gnss;   // v3: UART-вариант класса
 bool gnssOk = false;
 
 float vReal[cfg::FFT_N];
@@ -96,34 +96,32 @@ static const GpsPins GPS_PINS[] = {
     { (int8_t)cfg::GPS_PIN_TX, (int8_t)cfg::GPS_PIN_RX },   // ESP RX=41, TX=42
     { (int8_t)cfg::GPS_PIN_RX, (int8_t)cfg::GPS_PIN_TX },   // перевёрнутый
 };
-static const uint32_t GPS_BAUDS[] = { 38400, 9600, 115200, 57600 };
-static uint8_t gpsPinIdx = 0, gpsBaudIdx = 0;
+static uint8_t gpsPinIdx = 0;
 
-// (Пере)открыть Serial1 с текущими кандидатами пинов и бода.
+// (Пере)открыть Serial1 на фиксированном боде (MIA-M10Q заводской 38400)
+// с текущим кандидатом распиновки.
 static void gpsOpenUart()
 {
     Serial1.end();
     Serial1.setRxBufferSize(2048);
-    Serial1.begin(GPS_BAUDS[gpsBaudIdx], SERIAL_8N1,
+    Serial1.begin(cfg::GPS_BAUD, SERIAL_8N1,
                   GPS_PINS[gpsPinIdx].rx, GPS_PINS[gpsPinIdx].tx);
-    state::gpsBaud  = GPS_BAUDS[gpsBaudIdx];
+    state::gpsBaud  = cfg::GPS_BAUD;
     state::gpsRxPin = GPS_PINS[gpsPinIdx].rx;
 }
 
-// Следующий кандидат линка: сначала перебираем распиновку (она под подозрением),
-// и лишь пройдя оба варианта — двигаем бод (он заявлен 38400, но мало ли).
+// Следующий кандидат линка — другая распиновка (бод фиксирован 38400).
 static void gpsAdvanceScan()
 {
     gpsPinIdx ^= 1;
-    if (gpsPinIdx == 0 && ++gpsBaudIdx >= 4) gpsBaudIdx = 0;
 }
 
 static bool gpsConfigure()
 {
     static uint8_t failStreak = 0;
 
-    // 1) Открыть UART с текущими пинами+бодом и попробовать линк. Тишина →
-    //    сразу следующий кандидат. На молчащей линии VALSET слать смысла нет.
+    // 1) Открыть UART (бод фиксирован 38400) и попробовать линк. Тишина →
+    //    другая распиновка. На молчащей линии VALSET слать смысла нет.
     gpsOpenUart();
     delay(20);
     bool ubx, nmea;

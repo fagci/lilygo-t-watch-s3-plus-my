@@ -425,10 +425,6 @@ static void buildTileview()
 {
     tileview = lv_tileview_create(lv_scr_act());
     lv_obj_set_style_bg_color(tileview, lv_color_black(), 0);
-    // Непрозрачный фон tileview: тайлы/лейблы прозрачны, и на частичном
-    // draw-буфере в незакрашенных зазорах оставался старый кадр (кусок
-    // спидометра на экране GPS). Залитый чёрным родитель перекрывает это.
-    lv_obj_set_style_bg_opa(tileview, LV_OPA_COVER, 0);
     lv_obj_set_scrollbar_mode(tileview, LV_SCROLLBAR_MODE_OFF);
 
     int k = 0;

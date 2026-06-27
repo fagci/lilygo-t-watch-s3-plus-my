@@ -100,12 +100,14 @@ namespace state {
     extern float    gpsAlt;
     extern float    gpsPdop;
     extern float    gpsHacc;          // горизонтальная точность, м
+    extern float    gpsVacc;          // вертикальная точность, м
+    extern float    gpsHeading;       // курс движения (course over ground), °
+    extern float    gpsSacc;          // точность скорости, м/с
     extern double   distanceM;
     extern double   gpsPrevLat, gpsPrevLon;
     extern bool     gpsHasPrev;
 
     // Диагностика линка и спутников (экран GPS)
-    extern uint32_t gpsBaud;          // выбранный бод UART
     extern int8_t   gpsRxPin;         // активный пин приёма ESP (диагностика распиновки)
     extern uint16_t gpsRawBytes;      // сырьё с UART за окно пробы (~200мс)
     extern bool     gpsSawUbx;        // в сырье замечен UBX (0xB5)

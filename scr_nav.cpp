@@ -9,6 +9,7 @@ namespace scrSpeed {
     void build(lv_obj_t *parent) {
         root = parent;
         lv_obj_set_style_bg_color(root, lv_color_black(), 0);
+        lv_obj_set_style_bg_opa(root, LV_OPA_COVER, 0);   // непрозрачный фон: иначе в зазорах остаётся старый кадр
         lblSpeed = makeLabel(root, BIG_FONT, 0x00CCFF,
                              LV_ALIGN_CENTER, 0, 0);
         lv_label_set_text(lblSpeed, "0.0");
@@ -61,6 +62,7 @@ namespace scrGps {
     void build(lv_obj_t *parent) {
         root = parent;
         lv_obj_set_style_bg_color(root, lv_color_black(), 0);
+        lv_obj_set_style_bg_opa(root, LV_OPA_COVER, 0);   // непрозрачный фон: иначе в зазорах остаётся старый кадр
 
         lblFix = makeLabel(root, UI_FONT, 0x00FF88,
                            LV_ALIGN_TOP_LEFT, 4, cfg::CONTENT_TOP);

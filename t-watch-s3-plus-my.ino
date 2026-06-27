@@ -235,6 +235,15 @@ static void tileEventCb(lv_event_t *e)
         if (tiles[k] == act) { activateTile(k); break; }
 }
 
+// VALUE_CHANGED у tileview приходит в начале жеста — при медленном свайпе окно
+// добивающей перерисовки успевало истечь до того, как тайл осядет, и в зазорах
+// между лейблами оставался кусок предыдущего экрана. SCROLL_END приходит, когда
+// прокрутка реально завершилась — перезапускаем окно перерисовки отсюда.
+static void tileScrollEndCb(lv_event_t *e)
+{
+    lastTileSwitchMs = millis();
+}
+
 // Прыжок на конкретный экран по его индексу (для быстрых переходов)
 static void gotoScreen(int scr)
 {
@@ -448,7 +457,8 @@ static void buildTileview()
     // на осевшем тайле добиваем коротким окном инвалидации после переключения
     // (см. lastTileSwitchMs в loop).
     lv_obj_set_style_anim_duration(tileview, 90, 0);
-    lv_obj_add_event_cb(tileview, tileEventCb, LV_EVENT_VALUE_CHANGED, NULL);
+    lv_obj_add_event_cb(tileview, tileEventCb,      LV_EVENT_VALUE_CHANGED, NULL);
+    lv_obj_add_event_cb(tileview, tileScrollEndCb,  LV_EVENT_SCROLL_END,    NULL);
 }
 
 // ════════════════════════════════════════════════════════════════════════════

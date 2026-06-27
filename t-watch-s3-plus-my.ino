@@ -249,8 +249,7 @@ static void gotoScreen(int scr)
 // Тап по краю экрана меняет канал на RF-экранах (x-зона: лево=−, право=+)
 static void wakeScreen()
 {
-    state::screenOff    = false;
-    state::screenDimmed = false;
+    state::display = Display::ACTIVE;
     watch.setBrightness(cfg::BRIGHTNESS_FULL);
     appEnter(state::curScreen);   // парный к appExit() при засыпании
 }
@@ -581,13 +580,13 @@ void setup()
             navPressX = p.x; navPressY = p.y;
             liveRows = 0; liveScrolled = false;
             state::lastActivity = millis();
-            if (state::screenOff) wakeScreen();
+            if (state::display == Display::OFF) wakeScreen();
         }, LV_EVENT_PRESSED, NULL);
 
         // Удержание+движение: «живой» скролл списка за пальцем (плавнее, чем прыжок
         // на отпускании). Нижняя кромка отдана drawer'у; горизонталь — tileview.
         lv_indev_add_event_cb(indev, [](lv_event_t *) {
-            if (drawerOpen || state::screenOff) return;
+            if (drawerOpen || state::display == Display::OFF) return;
             if (state::curScreen != SCR_RECON && state::curScreen != SCR_NOTIF) return;
             if (navPressY > LV_VER_RES - 40) return;          // зона drawer — не скроллим
             lv_point_t p; lv_indev_get_point(lv_indev_get_act(), &p);
@@ -702,21 +701,20 @@ static void manageBrightness()
 {
     uint32_t idle = millis() - state::lastActivity;
     if (idle >= cfg::SCREEN_OFF_MS) {
-        if (!state::screenOff) {
-            state::screenOff    = true;
-            state::screenDimmed = false;
+        if (state::display != Display::OFF) {
+            state::display = Display::OFF;
             watch.setBrightness(0);
             appExit();   // приложение само гасит свои ресурсы (audio/lpd/wifi/ble)
             // GPS НЕ трогаем: его питанием рулит applyGpsPower по группе Nav,
             // чтобы на велосипеде при потухшем экране не было холодного старта.
         }
     } else if (idle >= cfg::SCREEN_DIM_MS) {
-        if (!state::screenDimmed) {
-            state::screenDimmed = true;
+        if (state::display != Display::DIMMED) {
+            state::display = Display::DIMMED;
             watch.setBrightness(cfg::BRIGHTNESS_DIM);
         }
-    } else if (state::screenDimmed) {
-        state::screenDimmed = false;
+    } else if (state::display == Display::DIMMED) {
+        state::display = Display::ACTIVE;
         watch.setBrightness(cfg::BRIGHTNESS_FULL);
     }
 }
@@ -766,7 +764,7 @@ static void pollWakeGesture()
 
     if (wake) {
         state::lastActivity = millis();           // снимает и dim
-        if (state::screenOff) wakeScreen();
+        if (state::display == Display::OFF) wakeScreen();
     }
 }
 
@@ -779,13 +777,13 @@ void loop()
     watch.loop();
     lv_task_handler();
 
-    if (state::screenOff) pollWakeGesture();   // на включённом экране жест не нужен
+    if (state::display == Display::OFF) pollWakeGesture();   // на включённом экране жест не нужен
     manageBrightness();
 
     if (notif::arrived) {                  // пришло уведомление
         notif::arrived = false;
         state::lastActivity = millis();
-        if (state::screenOff) wakeScreen();
+        if (state::display == Display::OFF) wakeScreen();
         if (cfg::NOTIF_VIBRO) watch.setHapticEffects(47);   // короткий buzz
         if (cfg::NOTIF_BEEP)  notifBeep();
     }
@@ -807,7 +805,7 @@ void loop()
 
     if (state::scrChanged) {
         state::scrChanged = false;
-        if (state::screenOff) {
+        if (state::display == Display::OFF) {
             wakeScreen();
         } else if (drawerOpen) {
             closeDrawer();
@@ -816,7 +814,7 @@ void loop()
         }
     }
 
-    if (!state::screenOff) {
+    if (state::display != Display::OFF) {
         if (!drawerOpen) {              // drawer перекрывает экран и статусбар
             updateStatusbar();
             screens[state::curScreen].update();

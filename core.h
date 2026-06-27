@@ -8,7 +8,7 @@
 #include <LV_Helper.h>
 #include <arduinoFFT.h>
 #include <NimBLEDevice.h>
-#include <SparkFun_u-blox_GNSS_Arduino_Library.h>
+#include <SparkFun_u-blox_GNSS_v3.h>
 #include <SensorPCF8563.hpp>
 #include <WiFi.h>
 #include <esp_wifi.h>
@@ -134,7 +134,7 @@ namespace state {
 }
 
 // Внешнее железо
-extern SFE_UBLOX_GNSS gnss;
+extern SFE_UBLOX_GNSS_SERIAL gnss;   // v3: UART-вариант класса
 extern bool gnssOk;
 
 // FFT (определён в core.cpp)

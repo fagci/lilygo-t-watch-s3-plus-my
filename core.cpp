@@ -23,7 +23,8 @@ namespace state {
     bool gpsActive=false,gpsSynced=false; float speedKmh=0;
     uint8_t gpsVisible=0;
     uint8_t gpsFix=0; double gpsLat=0,gpsLon=0; float gpsAlt=0,gpsPdop=99.9f,gpsHacc=0;
-    uint32_t gpsBaud=0; int8_t gpsRxPin=-1; uint16_t gpsRawBytes=0; bool gpsSawUbx=false,gpsSawNmea=false;
+    float gpsVacc=0,gpsHeading=0,gpsSacc=0;
+    int8_t gpsRxPin=-1; uint16_t gpsRawBytes=0; bool gpsSawUbx=false,gpsSawNmea=false;
     uint8_t gpsProtVer=0,gpsSivView=0; GpsSat gpsSats[GPS_SAT_MAX]={}; uint8_t gpsSatCount=0;
     double distanceM=0,gpsPrevLat=0,gpsPrevLon=0; bool gpsHasPrev=false;
     uint32_t stepCount=0,pomStart=0,stepsAtStart=0;
@@ -106,7 +107,6 @@ static void gpsOpenUart()
     Serial1.setRxBufferSize(2048);
     Serial1.begin(cfg::GPS_BAUD, SERIAL_8N1,
                   GPS_PINS[gpsPinIdx].rx, GPS_PINS[gpsPinIdx].tx);
-    state::gpsBaud  = cfg::GPS_BAUD;
     state::gpsRxPin = GPS_PINS[gpsPinIdx].rx;
 }
 
@@ -268,6 +268,8 @@ void readGPS()
     state::gpsVisible = gnss.getSIV();
     state::gpsPdop    = gnss.getPDOP() / 100.0f;
     state::gpsHacc    = gnss.getHorizontalAccEst() / 1000.0f;   // мм -> м
+    state::gpsVacc    = gnss.getVerticalAccEst()   / 1000.0f;   // мм -> м
+    state::gpsSacc    = gnss.getSpeedAccEst()      / 1000.0f;   // мм/с -> м/с
 
     if (fix >= 2) {
         double lat = gnss.getLatitude()  * 1e-7;
@@ -275,6 +277,7 @@ void readGPS()
         state::gpsLat   = lat;
         state::gpsLon   = lon;
         state::gpsAlt   = gnss.getAltitudeMSL() / 1000.0f;     // мм -> м
+        state::gpsHeading = gnss.getHeading() / 100000.0f;     // 1e-5° -> ° (курс движения)
 
         // Скорость: стоя на месте модуль шумит и иногда выдаёт фантом (192 км/ч).
         // Гасим в ноль, если фикс невалиден или скорость не превышает свою же

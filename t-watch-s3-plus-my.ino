@@ -818,13 +818,12 @@ void loop()
         if (!drawerOpen) {              // drawer перекрывает экран и статусбар
             updateStatusbar();
             screens[state::curScreen].update();
-            // Несколько кадров после снапа добиваем перерисовку осевшего тайла:
+            // Несколько кадров после снапа добиваем перерисовку ВСЕГО экрана:
             // VALUE_CHANGED у tileview приходит в начале анимации, а на маленьком
-            // draw-буфере финальный кадр иногда оставлял ошмётки соседнего экрана.
-            if (millis() - lastTileSwitchMs < 250) {
-                lv_obj_t *act = lv_tileview_get_tile_act(tileview);
-                if (act) lv_obj_invalidate(act);
-            }
+            // draw-буфере финальный кадр оставлял ошмётки соседнего экрана.
+            // Инвалидация только осевшего тайла не добивала — гасим весь экран.
+            if (millis() - lastTileSwitchMs < 250)
+                lv_obj_invalidate(lv_scr_act());
         }
         delay(20);
     } else {

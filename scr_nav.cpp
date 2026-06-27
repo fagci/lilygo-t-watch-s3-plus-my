@@ -86,11 +86,11 @@ namespace scrGps {
         if (!gnssOk) {
             snprintf(buf, sizeof(buf),
                 LV_SYMBOL_GPS " LINK DOWN\n"
-                "baud:%lu  rx-pin:%d\n"
-                "raw: %u B / 200ms\n"
+                "rx-pin: %d\n"
+                "raw: %u B\n"
                 "ubx: %s   nmea: %s\n"
-                "scanning pins/baud...",
-                (unsigned long)state::gpsBaud, state::gpsRxPin, state::gpsRawBytes,
+                "scanning pins...",
+                state::gpsRxPin, state::gpsRawBytes,
                 state::gpsSawUbx ? "Y" : "N", state::gpsSawNmea ? "Y" : "N");
             lv_obj_set_style_text_color(lblFix, lv_color_hex(0xFF4444), 0);
             lv_label_set_text(lblFix, buf);
@@ -105,11 +105,13 @@ namespace scrGps {
             snprintf(buf, sizeof(buf),
                 LV_SYMBOL_GPS " FIX %dD  use:%u/%u\n"
                 "%.6f %.6f\n"
-                "alt:%.0fm spd:%.1f acc:%.1fm\n"
+                "alt:%.0fm  hdg:%.0f  spd:%.1f\n"
+                "hAcc:%.1f vAcc:%.1f sAcc:%.1f\n"
                 "pDOP:%.1f dist:%.0fm pv:%u",
                 state::gpsFix, state::gpsVisible, state::gpsSivView,
                 state::gpsLat, state::gpsLon,
-                state::gpsAlt, state::speedKmh, state::gpsHacc,
+                state::gpsAlt, state::gpsHeading, state::speedKmh,
+                state::gpsHacc, state::gpsVacc, state::gpsSacc,
                 state::gpsPdop, state::distanceM, state::gpsProtVer);
             lv_obj_set_style_text_color(lblFix, lv_color_hex(0x00FF88), 0);
         } else {
@@ -117,13 +119,11 @@ namespace scrGps {
             snprintf(buf, sizeof(buf),
                 LV_SYMBOL_GPS " NO FIX  use:%u/%u\n"
                 "search: %02lu:%02lu\n"
-                "pDOP:%.1f  pv:%u  sync:%s\n"
-                "baud:%lu",
+                "pDOP:%.1f  pv:%u  sync:%s",
                 state::gpsVisible, state::gpsSivView,
                 s / 60, s % 60,
                 state::gpsPdop, state::gpsProtVer,
-                state::gpsSynced ? "Y" : "N",
-                (unsigned long)state::gpsBaud);
+                state::gpsSynced ? "Y" : "N");
             lv_obj_set_style_text_color(lblFix, lv_color_hex(0xFFCC44), 0);
         }
         lv_label_set_text(lblFix, buf);
